@@ -317,11 +317,11 @@ final class PayloadUploadQueue {
             return "\(sid) ✗ 0 pts (時間窗口未對齊?)"
         }
         // Show `—` when a metric is missing rather than substituting 0 —
-        // a 0 mm residual / 0 m peak is a meaningful (if unlikely) value
-        // and we don't want it confused with "server didn't return one".
+        // a 0 mm residual is a meaningful (if unlikely) value and we don't
+        // want it confused with "server didn't return one". `peak_z_m` was
+        // retired from /pitch response when server fitting moved to RANSAC.
         let gap = r.mean_residual_m.map { String(format: "%.0fmm", $0 * 1000.0) } ?? "—"
-        let peak = r.peak_z_m.map { String(format: "%.2fm", $0) } ?? "—"
         let dur = r.duration_s.map { String(format: "%.2fs", $0) } ?? "—"
-        return "\(sid) ✓ \(r.triangulated_points) pts gap=\(gap) peak=\(peak) dur=\(dur)"
+        return "\(sid) ✓ \(r.triangulated_points) pts gap=\(gap) dur=\(dur)"
     }
 }

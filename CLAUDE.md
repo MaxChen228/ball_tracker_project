@@ -154,6 +154,8 @@ PR `a66d5db` 退役 HTTP `/heartbeat`，改純 WS 後曾漏掉 `/sync/start` 的
    `state.commands_for_devices()` 的 caller）
 4. 凡是「server 改變狀態 → device 應該動作」的端點，確認後面有
    `await device_ws.broadcast(...)` 或 `device_ws.send`
+5. unknown WS mtype 現在會 raise ValueError + close socket — regression
+   test 在 `server/test_device_ws_unknown_mtype.py` 鎖住。
 
 **症狀識別**：log 出現 `reports_received=[]` 加 source=A/B 完全沒 log，
 幾乎一定是 iOS 沒收到 trigger，**不是** detection 失敗。
@@ -310,7 +312,7 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
   `config_used_by_algorithm` projection 重建偵測
 - iOS 對 server-required WS 欄位拒 schema 漂（atomic-drop guard at handler
   head）
-- WS settings push 12 欄位文件化（[docs/protocols.md](docs/protocols.md)，
+- WS settings push 13 欄位文件化（含 `type` discriminator；[docs/protocols.md](docs/protocols.md)，
   PR #93）
 
 ### How to apply
@@ -344,8 +346,9 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如
   `state.live_session_frozen_config(sid)`），不要戳 `state._xxx`
-  （`state.py` 目前 2600+ 行，PR #117/#119 把 `state_events.py` /
-  `session_results.py` / `detection_paths.py` 分出後仍是最大單一模組）
+  （`state.py` 目前 2150+ 行，PR #117/#119 + state-py-split 把 `state_events.py` /
+  `session_results.py` / `detection_paths.py` / `state_detection.py` /
+  `status_view.py` / `ws_messages.py` 分出後仍是最大單一模組）
 
 ### 待辦（PR #93 NIT 清單）
 

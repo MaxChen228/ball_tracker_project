@@ -447,6 +447,101 @@ def test_stamp_server_post_config_returns_none_when_session_deleted(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 10b. stamp_server_post_config — content-check race guard (PR #122 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_stamp_server_post_config_survives_concurrent_record_republish(
+    monkeypatch, tmp_path,
+):
+    """Regression for PR #122 stamp_server_post_config content-check.
+
+    The pre-#122 code re-read `self.results.get(sid)` after `store_result`
+    and compared `stored is not updated` (identity). A benign concurrent
+    `record()` between the store_result and the re-read publishes a
+    FRESHER SessionResult object that ALREADY carries our stamp (record()
+    reads from disk where store_result just wrote, then republishes a
+    different SessionResult instance). Identity comparison treated those
+    as "race tripped" and silently returned None — caller skipped the
+    SSE `fit` broadcast even though the stamp had actually landed.
+
+    Now: content check via `snapshot.algorithm_id in
+    stored.config_used_by_algorithm`. A benign republish that preserves
+    the stamp must return the stored object, not None."""
+    import main
+    from detection_paths import stamp_server_post_run
+    from schemas import (
+        BlobCandidate,
+        DetectionConfigSnapshotPayload,
+        FramePayload,
+        PitchPayload,
+    )
+
+    s = main.State(data_dir=tmp_path)
+    s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
+                sync_anchor_timestamp_s=0.0)
+    s.heartbeat("B", time_synced=True, time_sync_id="sy_deadbeef",
+                sync_anchor_timestamp_s=0.0)
+    snap = DetectionConfigSnapshotPayload(
+        algorithm_id="v11_hsv_cc",
+        params={
+            "hsv": {"h_min": 10, "h_max": 20, "s_min": 30,
+                    "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
+        preset_name=None,
+    )
+    frame = FramePayload(
+        frame_index=1, timestamp_s=0.1, ball_detected=True,
+        candidates=[BlobCandidate(
+            px=10.0, py=20.0, area=100, area_score=1.0,
+            aspect=1.0, fill=0.68,
+        )],
+    )
+    for cam in ("A", "B"):
+        p = PitchPayload(
+            camera_id=cam, session_id="s_deadbeef",
+            sync_id="sy_deadbeef", sync_anchor_timestamp_s=0.0,
+            video_start_pts_s=0.0,
+        )
+        stamp_server_post_run(p, snap, [frame])
+        s.record(p)
+    # Sanity: result is in the store with our stamp already present.
+    assert "v11_hsv_cc" in s.results["s_deadbeef"].config_used_by_algorithm
+
+    # Inject a benign race: when stamp_server_post_config calls
+    # store_result, simulate a concurrent record() that publishes a
+    # FRESH SessionResult instance into self.results. The fresh result
+    # carries the stamp (record() reads the just-written snapshot via
+    # rebuild). Identity comparison would treat this as a race trip and
+    # return None even though the snapshot DID land in self.results.
+    original_store_result = s.store_result
+
+    def racing_store_result(result):
+        original_store_result(result)
+        # Replace self.results[sid] with a fresh instance carrying the
+        # same snapshot to simulate a benign concurrent record() that
+        # republished a new SessionResult object.
+        with s._lock:
+            current = s.results.get(result.session_id)
+            if current is not None:
+                # model_copy(deep=True) yields a NEW object that is
+                # `is not` the one store_result wrote. Pre-fix identity
+                # check would trip here and return None.
+                s.results[result.session_id] = current.model_copy(deep=True)
+
+    monkeypatch.setattr(s, "store_result", racing_store_result)
+
+    result = s.stamp_server_post_config("s_deadbeef", snap)
+    assert result is not None, (
+        "content-check race guard regressed: a benign concurrent record() "
+        "republish that preserves the stamp must NOT cause stamp_server_post_config "
+        "to silently return None (which skips the SSE fit broadcast)"
+    )
+    assert "v11_hsv_cc" in result.config_used_by_algorithm
+
+
+# ---------------------------------------------------------------------------
 # Originally-positioned: state_runtime range guard (kept below).
 # ---------------------------------------------------------------------------
 

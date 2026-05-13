@@ -425,6 +425,38 @@ final class CameraCommandRouterTests: XCTestCase {
         XCTAssertEqual(call?.2, 4.0)
     }
 
+    /// PR #122 D-4 + Round-2: out-of-contract values (empty `emit_at_s`) must
+    /// atomic-drop at the route layer rather than be silently rewritten to
+    /// `[0.3]` inside the coordinator.
+    func testSyncRunDropsWhenEmitAtSIsEmpty() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "sync_run",
+            "sync_id": "mutual_empty",
+            "emit_at_s": [Double](),
+            "record_duration_s": 4.0
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.applyMutualSyncCalls.isEmpty,
+                      "sync_run must atomic-drop when emit_at_s is empty (D-4)")
+    }
+
+    /// PR #122 D-4 + Round-2: record_duration_s < 1.0s would previously be
+    /// silently clamped to 1.0 inside the coordinator. The route layer must
+    /// atomic-drop the whole message instead.
+    func testSyncRunDropsWhenRecordDurationBelowFloor() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "sync_run",
+            "sync_id": "mutual_short",
+            "emit_at_s": [0.5, 1.5],
+            "record_duration_s": 0.5
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.applyMutualSyncCalls.isEmpty,
+                      "sync_run must atomic-drop when record_duration_s < 1.0 (D-4)")
+    }
+
     // MARK: paths parser — empty / garbage tolerant
 
     func testSettingsPathsParserIgnoresGarbage() {

@@ -90,13 +90,27 @@ class DeviceSocketManager:
             await websocket.send_json(message)
             return True
         except Exception as exc:
+            # Don't pop `_sockets[cam]` here. The receive loop in
+            # `routes/device_ws.ws_device` is the canonical lifetime owner
+            # of the socket — it eventually catches the same I/O failure
+            # (the WebSocket transport is full-duplex; if send raised, the
+            # receive side will too on its next `receive_json`), enters its
+            # `finally` block, and calls `disconnect(cam, ws)` then.
+            #
+            # Popping the socket from this send-side call while the receive
+            # task is still alive creates a split-brain: snapshot().connected
+            # flips to False here, but the receive loop is still consuming
+            # frames against the same (now-invisible) socket. The next
+            # connect from that cam treats it as a fresh connection and
+            # broadcasts online=True while the old task is still alive,
+            # racing two `device_status` payloads through SSE.
             logger.warning(
-                "device_ws.send: cam=%s send failed (type=%s): %s",
+                "device_ws.send: cam=%s send failed (type=%s, leaving socket "
+                "for receive loop to close): %s",
                 camera_id,
                 mtype,
                 exc,
             )
-            self.disconnect(camera_id, websocket)
             return False
 
     async def broadcast(self, message_by_camera: dict[str, dict[str, Any]]) -> None:

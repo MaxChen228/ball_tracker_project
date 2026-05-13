@@ -282,6 +282,166 @@ def test_missing_bucket_falls_back_to_rebuild(monkeypatch, tmp_path):
 # Mutation isolation (copy-mutate-swap, not in-place)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# PR #122 R1-NIT-1 / R1-NIT-4: re-republish merge + orphan-unlink
+# (concurrent record / delete races during set_active_server_post_algorithm)
+# ---------------------------------------------------------------------------
+
+def test_set_active_does_not_clobber_concurrent_record(monkeypatch, tmp_path):
+    """Regression for PR #122 R1-NIT-1: between the first disk write and
+    the in-memory republish, a concurrent `record()` can publish fresher
+    `frames_by_algorithm` / `config_used_by_algorithm` data. The pre-#122
+    code clobbered with the stale deep-copy — silently dropping the fresh
+    write from both memory and the post-republish disk write.
+
+    Now: the pointer flip must apply ONLY to the pointer field on the
+    LATEST in-memory pitch; everything else from the racing record() must
+    survive."""
+    monkeypatch.setattr(
+        session_results, "triangulate_pair", _FakeTriangulatePair(),
+    )
+    s = main.State(data_dir=tmp_path)
+    _build_dual_cam_session(s, monkeypatch, "s_fa57")
+
+    # Inject a race: when set_active flushes the first-round disk write
+    # for cam A, simulate a concurrent record() that publishes a fresh
+    # v12_test frame on cam A (e.g. a re-run that completed mid-flight).
+    original_atomic_write = s._atomic_write
+    raced: dict[str, bool] = {"fired": False}
+
+    def racing_atomic_write(path, payload):
+        original_atomic_write(path, payload)
+        if not raced["fired"] and "session_s_fa57_A" in path.name:
+            raced["fired"] = True
+            # Concurrent record() publishes a fresh frame under v12_test.
+            # The newer frame_idx (99) acts as a marker: if the
+            # set_active deep-copy clobbered, the merged pitch in memory
+            # would carry frame_idx=12 from the snapshot taken at the
+            # top of set_active; if the re-republish merge is correct,
+            # it carries frame_idx=99 from this race.
+            _record_pitch_with_alg(
+                s, cam="A", sid="s_fa57", sync_id="sy_deadbeef",
+                alg_id="v12_test", frame_idx=99,
+            )
+
+    monkeypatch.setattr(s, "_atomic_write", racing_atomic_write)
+
+    result = s.set_active_server_post_algorithm("s_fa57", "v11_hsv_cc")
+    assert result is not None
+    # The fresh-record's frame_idx=99 frame must survive on cam A under
+    # v12_test. Pre-#122 silent clobber would have left frame_idx=12.
+    cam_a_pitch = s.pitches[("A", "s_fa57")]
+    v12_frames = cam_a_pitch.frames_by_algorithm.get("v12_test", [])
+    frame_indices = [f.frame_index for f in v12_frames]
+    assert 99 in frame_indices, (
+        f"concurrent record() was silently clobbered; v12 frame indices "
+        f"on cam A = {frame_indices}, expected 99 to survive"
+    )
+    # Pointer flip still landed.
+    assert cam_a_pitch.active_server_post_algorithm_id == "v11_hsv_cc"
+
+
+def test_set_active_unlinks_orphan_disk_file_when_cam_pitch_deleted(
+    monkeypatch, tmp_path,
+):
+    """Regression for PR #122 R1-NIT-4: if cam A's pitch is deleted (via
+    delete_session/remove_pitch) between the first disk write and the
+    re-republish, that disk file is an orphan — the in-memory absence is
+    the source of truth. Leaving it would resurrect the tombstoned pitch
+    on next boot.
+
+    Forces the race by setting `pitches[(A, sid)] = None` mid-write,
+    then verifies the cam-A pitch file is unlinked when set_active
+    finishes."""
+    monkeypatch.setattr(
+        session_results, "triangulate_pair", _FakeTriangulatePair(),
+    )
+    s = main.State(data_dir=tmp_path)
+    _build_dual_cam_session(s, monkeypatch, "s_fa57")
+
+    cam_a_path = s._pitch_path("A", "s_fa57")
+    assert cam_a_path.exists(), "fixture setup: cam A pitch on disk"
+
+    # Inject the delete race: when set_active flushes cam A's first
+    # disk write, simulate a delete_session that drops cam A's pitch
+    # from the in-memory map.
+    original_atomic_write = s._atomic_write
+    raced: dict[str, bool] = {"fired": False}
+
+    def racing_atomic_write(path, payload):
+        original_atomic_write(path, payload)
+        if not raced["fired"] and "session_s_fa57_A" in path.name:
+            raced["fired"] = True
+            # Simulate a cam-level pitch eviction during the race window.
+            with s._lock:
+                s.pitches.pop(("A", "s_fa57"), None)
+
+    monkeypatch.setattr(s, "_atomic_write", racing_atomic_write)
+
+    result = s.set_active_server_post_algorithm("s_fa57", "v11_hsv_cc")
+    assert result is not None  # cam B still present → operation continues
+    # Cam A pitch file must have been unlinked (orphan from first-round
+    # write). Pre-fix code left it on disk, resurrecting the pitch on
+    # next State() init.
+    assert not cam_a_path.exists(), (
+        "set_active must unlink the orphan first-round disk write when "
+        "the cam-level pitch was deleted mid-flight"
+    )
+
+
+def test_set_active_repersists_merged_pitch(monkeypatch, tmp_path):
+    """Regression for PR #122 R1-NIT-1 disk side: after the in-memory
+    republish merges fresh-record fields with the pointer flip, the
+    merged pitch must be re-written to disk. Without the re-persist,
+    memory holds the merged state but disk holds either the stale
+    first-round write OR the racing record()'s write — a restart would
+    silently lose one side.
+
+    Verifies the second-round write actually occurred by counting writes
+    for the cam-A pitch path."""
+    monkeypatch.setattr(
+        session_results, "triangulate_pair", _FakeTriangulatePair(),
+    )
+    s = main.State(data_dir=tmp_path)
+    _build_dual_cam_session(s, monkeypatch, "s_fa57")
+
+    original_atomic_write = s._atomic_write
+    write_counts: dict[str, int] = {}
+    raced: dict[str, bool] = {"fired": False}
+
+    def counting_atomic_write(path, payload):
+        write_counts[path.name] = write_counts.get(path.name, 0) + 1
+        original_atomic_write(path, payload)
+        # Trigger the concurrent record() exactly once during cam A's
+        # first-round write. The R1-NIT-1 fix re-persists the merged
+        # pitch in a second-round write — without it, only one write
+        # per cam pitch would occur during set_active.
+        if not raced["fired"] and "session_s_fa57_A" in path.name:
+            raced["fired"] = True
+            _record_pitch_with_alg(
+                s, cam="A", sid="s_fa57", sync_id="sy_deadbeef",
+                alg_id="v12_test", frame_idx=77,
+            )
+
+    write_counts.clear()
+    monkeypatch.setattr(s, "_atomic_write", counting_atomic_write)
+
+    result = s.set_active_server_post_algorithm("s_fa57", "v11_hsv_cc")
+    assert result is not None
+
+    cam_a_pitch_writes = write_counts.get("session_s_fa57_A.json", 0)
+    # Expected writes for cam A during set_active:
+    #   1) first-round write (line ~1585) of the pre-merge deep-copy
+    #   2) re-persist after the merge (the R1-NIT-1 fix)
+    # The racing record() also writes once, so total ≥ 3. Either way,
+    # the set_active path itself must contribute ≥ 2 writes for cam A.
+    assert cam_a_pitch_writes >= 3, (
+        f"expected ≥3 writes on cam A pitch (first-round + re-persist + "
+        f"racing record), got {cam_a_pitch_writes}; without R1-NIT-1 the "
+        f"merged pitch is not re-persisted to disk"
+    )
+
+
 def test_prior_result_reference_not_mutated(monkeypatch, tmp_path):
     """Critical concurrency invariant: a reader holding a reference to
     `state.results[sid]` before the switch must see the OLD result

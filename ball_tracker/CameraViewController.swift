@@ -92,7 +92,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// safe across queues. Read/write through the snapshot/set helpers below.
     private let sessionStateLock = NSLock()
     private var _currentSessionId: String?
-    private var _currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
+    /// Empty until the WS arm/settings handler pushes paths. Defaulting to
+    /// `[.serverPost]` was a silent fallback — a pre-push payload would
+    /// claim serverPost even when the server-requested set was different.
+    private var _currentSessionPaths: Set<ServerUploader.DetectionPath> = []
 
     private func snapshotSessionId() -> String? {
         sessionStateLock.lock(); defer { sessionStateLock.unlock() }

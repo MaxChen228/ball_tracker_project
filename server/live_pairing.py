@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from candidate_selector import Candidate, score_candidates
+from pairing import _MAX_DT_S as _SERVER_POST_WINDOW_S
 from pairing_tuning import PairingTuning
 from schemas import FramePayload, TriangulatedPoint
 
@@ -14,6 +15,12 @@ logger = logging.getLogger("ball_tracker")
 
 
 _OTHER_CAM = {"A": "B", "B": "A"}
+
+# Sentinel for "no sync anchor on either cam yet" — produced explicitly so
+# call sites (tests, pre-arm fixtures) can't silently fall through the old
+# `(anchors or {}).get(...)` path. Production path always builds a real
+# anchors dict from `state.device_for_camera` inside `ingest_live_frame`.
+NO_ANCHORS: dict[str, float | None] = {"A": None, "B": None}
 
 
 @dataclass
@@ -42,7 +49,12 @@ class LivePairingSession:
     """Incremental live A/B pairing over a bounded rolling window."""
 
     session_id: str
-    window_s: float = 0.008
+    # Cross-cam pairing window. Match the server_post pairing constant
+    # (`pairing._MAX_DT_S`, default 1/120 ≈ 8.33 ms) so live and
+    # server_post don't silently disagree on which A/B frame pairs are
+    # eligible — that mismatch was the subtle bug behind a 5 % drop in
+    # live-pair yield vs. reprocess for the same MOVs.
+    window_s: float = _SERVER_POST_WINDOW_S
     max_frames_per_cam: int = 500
     buffers: dict[str, deque[FramePayload]] = field(
         default_factory=lambda: {"A": deque(), "B": deque()}
@@ -134,19 +146,25 @@ class LivePairingSession:
         cam: str,
         frame: FramePayload,
         triangulate_pair: Callable[[FramePayload, FramePayload], list[TriangulatedPoint]],
-        anchors: dict[str, float | None] | None = None,
+        anchors: dict[str, float | None] = NO_ANCHORS,
     ) -> list[TriangulatedPoint]:
         """Buffer one frame and pair it against the most recent peer-cam
         frames within `window_s`.
 
-        `anchors` (optional) — `{cam_id: sync_anchor_timestamp_s}`. When
-        supplied, the cross-cam window check uses anchor-relative time
-        (`frame.timestamp_s − anchors[cam]`) instead of raw `timestamp_s`.
-        Required when each camera reports its own device-local clock (each
-        iPhone's `mach_absolute_time` since boot, so two phones sit tens of
-        thousands of seconds apart). Stored frames keep raw timestamps —
-        only the dt comparison is anchor-shifted, so downstream persistence
-        and triangulation see the original values."""
+        `anchors` — `{cam_id: sync_anchor_timestamp_s_or_None}`. Defaults
+        to module-level `NO_ANCHORS` (both cams None) so test fixtures
+        and pre-arm callers don't accidentally trip the silent
+        `(anchors or {})` fallback removed in the audit. The cross-cam
+        window check uses anchor-relative time (`frame.timestamp_s −
+        anchors[cam]`) when both entries are non-None. Required for the
+        anchor-relative path because each camera reports its own
+        device-local clock (each iPhone's `mach_absolute_time` since
+        boot, so two phones sit tens of thousands of seconds apart) —
+        without anchors we'd be window-matching across that clock skew.
+        Stored frames keep raw timestamps — only the dt comparison is
+        anchor-shifted, so downstream persistence and triangulation see
+        the original values. Per-cam value may be None when that cam
+        hasn't received its sync chirp yet (partial-anchor branch)."""
         with self._lock:
             # Apply shape-prior candidate selection BEFORE buffering, so
             # downstream pairing + persistence see a single resolved (px, py).
@@ -163,8 +181,8 @@ class LivePairingSession:
             other = _OTHER_CAM.get(cam)
             if other is None:
                 return []
-            own_anchor = (anchors or {}).get(cam)
-            peer_anchor = (anchors or {}).get(other)
+            own_anchor = anchors.get(cam)
+            peer_anchor = anchors.get(other)
             if (own_anchor is None) != (peer_anchor is None):
                 # Partial anchor (one cam synced, other not) — refusing to
                 # match on raw timestamps; the two devices' clocks sit

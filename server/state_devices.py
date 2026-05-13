@@ -72,6 +72,42 @@ class DeviceRegistry:
             )[0]
             del self.devices[oldest]
 
+    def touch_last_seen(self, camera_id: str, now: float | None = None) -> None:
+        """Freshen `Device.last_seen_at` WITHOUT touching any other state.
+
+        Unlike `heartbeat()` (which rebuilds the whole `Device` record and
+        therefore clears `time_synced` / `time_sync_id` / battery when those
+        kwargs aren't supplied), this is a surgical liveness poke. Called
+        from the WS connect handler so /status sees the cam as online
+        immediately on (re)connect without nuking the time-sync state that
+        a prior session may have established.
+
+        If the cam isn't yet in the registry (first-ever connect after
+        boot, or it was GC'd) we seed a minimum Device record — same
+        side-effect as `heartbeat(camera_id)` with no kwargs, just without
+        wiping any prior cam's time-sync (there is none to wipe).
+        """
+        now = now if now is not None else self._time_fn()
+        dev = self.devices.get(camera_id)
+        if dev is None:
+            self.devices[camera_id] = Device(
+                camera_id=camera_id,
+                last_seen_at=now,
+            )
+            return
+        self.devices[camera_id] = Device(
+            camera_id=dev.camera_id,
+            last_seen_at=now,
+            time_synced=dev.time_synced,
+            time_sync_id=dev.time_sync_id,
+            time_sync_at=dev.time_sync_at,
+            sync_anchor_timestamp_s=dev.sync_anchor_timestamp_s,
+            battery_level=dev.battery_level,
+            battery_state=dev.battery_state,
+            device_id=dev.device_id,
+            device_model=dev.device_model,
+        )
+
     def mark_offline(self, camera_id: str) -> None:
         dev = self.devices.get(camera_id)
         if dev is None:

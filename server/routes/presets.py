@@ -144,8 +144,9 @@ def _read_preset_body(body: object, *, name_from_url: str | None) -> Preset:
         name=name,
         label=label,
         algorithm_id=algorithm_id,
-        # Round-tripped dict — extras dropped (schema has extra='forbid'
-        # for hybrid_28d, allow-by-default for v11), defaults filled.
+        # Round-tripped dict — both V11Params and Hybrid28dParams use
+        # extra='forbid', so unknown fields raise at validation above
+        # rather than being silently dropped here; defaults are filled.
         # Storing model_dump() instead of the raw body ensures disk
         # files always conform to the schema's serialised shape.
         params=typed.model_dump(),

@@ -10,8 +10,12 @@ Pixel projection: u = fx * X/Z + cx, v = fy * Y/Z + cy.
 """
 from __future__ import annotations
 
+import logging
+
 import cv2
 import numpy as np
+
+logger = logging.getLogger("ball_tracker")
 
 
 def build_K(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
@@ -53,6 +57,19 @@ def recover_extrinsics(K: np.ndarray, H: np.ndarray) -> tuple[np.ndarray, np.nda
         t = -t
         if np.linalg.det(R) < 0:
             R[:, 2] *= -1
+
+    # Sanity check the recovered pose: camera center should sit above the
+    # plate (Z > 0). A center below the plate isn't an ambiguity this
+    # routine can resolve — it almost always points at a mirrored marker
+    # layout or swapped ArUco IDs on the caller's side. Emit a WARN so
+    # the dashboard operator can spot a bad calibration without digging.
+    C = -R.T @ t
+    if C[2] < 0.0:
+        logger.warning(
+            "recover_extrinsics: camera center below plate (C_z=%.3f m) — "
+            "likely mirrored marker layout or swapped ArUco IDs",
+            float(C[2]),
+        )
 
     return R, t
 

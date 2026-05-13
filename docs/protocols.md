@@ -19,25 +19,24 @@
   paths: list[DetectionPath]                      # snapshots session.paths at recording start. Post-redesign, session.paths is always {live} at arm time; server_post gets added only after an operator-triggered run.
   sync_anchor_timestamp_s: float | null           # chirp-detected session-clock PTS; null if skipped
   video_start_pts_s: float                        # abs PTS of first MOV frame (session clock)
-  video_fps: float
+  video_fps: float | null                         # optional sanity-check; iOS no longer ships, server tolerant
   frames_live: list[FramePayload] | null          # populated only on recovery paths; normally arrives over WS
                                                   # FramePayload.candidates: list[BlobCandidate] is the Phase B wire shape.
                                                   # iOS ships px/py/area/area_score/aspect/fill directly (post-abfa422);
                                                   # server stamps `cost` in live_pairing._resolve_candidates after the
                                                   # shape-prior selector runs.
   local_recording_index: int?                     # device-local debug counter; server ignores
-  live_config_used: {                             # full arm-time frozen snapshot of the live detector config
-    algorithm_id: str,
-    hsv: {h_min,h_max,s_min,s_max,v_min,v_max},
-    shape_gate: {aspect_min,fill_min},
-    preset_name: str | null                       # null = custom config, non-null = identity claim
-  } | null
-  server_post_config_used: {                      # full snapshot of the most recent server_post rerun that produced frames_server_post
-    algorithm_id: str,
-    hsv: {h_min,h_max,s_min,s_max,v_min,v_max},
-    shape_gate: {aspect_min,fill_min},
-    preset_name: str | null
-  } | null
+  config_used_by_algorithm: dict[str, DetectionConfigSnapshotPayload]
+    # key   = algorithm_id (str): "ios_capture_time" for live,
+    #         runnable detector ids ("v11_hsv_cc", "hybrid_28d", …) for server_post
+    # value = {
+    #   algorithm_id: str,
+    #   params: dict,            # opaque, algorithm-defined; v11_hsv_cc encodes
+    #                            # {hsv:{h_min,...,v_max}, shape_gate:{aspect_min,fill_min}}
+    #   preset_name: str | null  # null = custom/ad-hoc; non-null = identity claim
+    # }
+    # live_config_used / server_post_config_used are server-side computed-field
+    # projections (read-only), not iOS upload fields.
   ```
 
   `SessionResult` carries the same `live_config_used` and `server_post_config_used` fields, but both are `@computed_field` projections over the canonical `config_used_by_algorithm` dict — there is no cross-cam aggregation or A-wins-B-fallback. `live_config_used` returns `config_used_by_algorithm.get(ios_capture_time)`; `server_post_config_used` returns `config_used_by_algorithm.get(active_server_post_algorithm_id)`. Neither field is written to disk: `_PITCH_PERSIST_EXCLUDE` and `_RESULT_PERSIST_EXCLUDE` strip both projections from `.model_dump(mode="json")` so the dict is the only on-disk truth. The events list / viewer CFG strip renders from these projections directly, so custom configs and deleted presets still show the exact frozen HSV + gate values that produced the session.
@@ -53,6 +52,8 @@
 Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). iPhones never generate pairing identifiers.
 
 `POST /sessions/arm` may omit `paths`, in which case the operator's runtime default is used. If a JSON body includes `paths`, it must be a non-empty array of known `DetectionPath` values; unknown values and empty arrays return 422 instead of falling back to defaults.
+
+`POST /sessions/arm` also accepts an optional `max_duration_s: float` (JSON body or form / query) — the auto-disarm timeout the server enforces and re-broadcasts in the WS `arm` push. Omitted → `_DEFAULT_SESSION_TIMEOUT_S` from `server/routes/sessions.py`.
 
 Triangulation requires **both** cameras to have `intrinsics` and `homography` present AND `sync_anchor_timestamp_s` non-null — if any is missing, `SessionResult.error` is set and triangulation is skipped (raw payload + MOV are still persisted for forensics).
 
@@ -187,7 +188,7 @@ record_duration_s: float             # how long iOS records audio for matched-fi
 
 #### `type: "sync_command"` — chirp time-sync trigger
 
-Pushed by `routes/sync.py::start_sync` (near the per-cam broadcast loop) when an operator triggers a chirp time-sync run from the dashboard. Each cam in the dispatched set gets one push with its own `sync_command_id`. iOS handles it in `ball_tracker/CameraCommandRouter.swift:91` (`case "sync_command"`): the cam latches the id, starts audio capture for matched-filter chirp detection, and reports the detected PTS back via the next `heartbeat` (`time_sync_id` + `sync_anchor_timestamp_s`). Distinct from `sync_run` above, which is the late-join push for the **mutual-sync coordinator** (a separate two-device flow); the chirp single-shot path goes through `sync_command`.
+Pushed by `routes/sync.py::start_sync` (near the per-cam broadcast loop) when an operator triggers a chirp time-sync run from the dashboard. Each cam in the dispatched set gets one push with its own `sync_command_id`. iOS handles it in `ball_tracker/CameraCommandRouter.swift:106` (`case "sync_command"`): the cam latches the id, starts audio capture for matched-filter chirp detection, and reports the detected PTS back via the next `heartbeat` (`time_sync_id` + `sync_anchor_timestamp_s`). Distinct from `sync_run` above, which is the late-join push for the **mutual-sync coordinator** (a separate two-device flow); the chirp single-shot path goes through `sync_command`.
 
 ```
 type: "sync_command"
@@ -197,7 +198,7 @@ sync_command_id: str                 # server-minted run id; iOS echoes it back 
 
 #### `type: "calibration_updated"` — peer cam re-calibrated
 
-Pushed by `routes/calibration.py::_handle_calibration_completed` (near the broadcast call at the end of the function) to **every other cam** after a successful auto-calibration of one cam. Lets the remaining cam(s) refresh any cross-cam state (e.g. dashboard preview hints) without polling. Handled in `ball_tracker/CameraCommandRouter.swift:127` (`case "calibration_updated"`).
+Pushed by `routes/calibration.py::_handle_calibration_completed` (near the broadcast call at the end of the function) to **every other cam** after a successful auto-calibration of one cam. Lets the remaining cam(s) refresh any cross-cam state (e.g. dashboard preview hints) without polling. Handled in `ball_tracker/CameraCommandRouter.swift:142` (`case "calibration_updated"`).
 
 ```
 type: "calibration_updated"
@@ -222,6 +223,8 @@ device_id: str | null                # identifierForVendor UUID (or "unknown-<uu
 device_model: str | null             # sysctl hw.machine ("iPhone15,3" etc.); ≤ 32 chars
 ```
 
+> **iOS-sent, server-ignored:** iOS also ships `cam` (camera role) and, when armed, `session_id`. The server already knows the cam from the WS URL path and the session id from `state.session_armed`, so both are accepted but unread. Kept for client-side debug visibility only.
+
 #### `type: "heartbeat"` — periodic liveness + telemetry
 
 Sent every `heartbeat_interval_s` (≈ 1 Hz). Same identity/battery/sync fields as `hello`, plus optional `sync_telemetry` for the mutual-sync coordinator. Server fans out a `device_heartbeat` SSE so the dashboard updates without waiting for the 5 s `/status` poll.
@@ -232,6 +235,8 @@ time_sync_id, sync_anchor_timestamp_s, battery_level, battery_state, device_id, 
                                      # same shapes as `hello`
 sync_telemetry: {…} | absent         # opaque to this doc; consumed by state._sync.record_sync_telemetry
 ```
+
+> **iOS-sent, server-ignored:** iOS also ships `cam` (camera role) and `t_session_s` (`CACurrentMediaTime()` at send time). Both are accepted but unread — the cam is already pinned by the WS URL path and the server stamps its own arrival time. Kept for client-side debug visibility only.
 
 #### `type: "frame"` — one detected frame
 
@@ -332,6 +337,39 @@ data: {
   "frames_total": int                    # total MOV frame count; null if unknown
 }
 ```
+
+## Preset management — `POST /presets`, `POST /presets/active`, `DELETE /presets/{name}`
+
+(no WS push for these; consumed by dashboard, not iOS)
+
+### `POST /presets/active`
+
+Switches the active preset for one of the two slots. Body (JSON or form):
+
+```
+name: str        # preset slug under data/presets/<slug>.json
+target: str      # "live" | "server_post"
+```
+
+Behaviour:
+- `target="live"`: snaps `DetectionConfig`, WS-broadcasts a settings push. Preset's `algorithm_id` must be `v11_hsv_cc`; otherwise 422.
+- `target="server_post"`: writes `data/active_server_post_preset.json`; no WS push.
+
+Error matrix:
+
+| Status | Trigger |
+|---|---|
+| 400 | Missing `name` or `target` |
+| 404 | Preset `name` not on disk |
+| 409 | Preset deleted concurrently |
+| 422 | `target` not in `{"live","server_post"}` |
+| 422 | `target="live"` + preset `algorithm_id` ≠ `v11_hsv_cc` |
+
+Response: `{"ok": true, "active": "<name>", "target": "<target>"}`
+
+### `POST /presets`, `GET /presets`, `GET /presets/{name}`, `DELETE /presets/{name}`
+
+Preset CRUD; params validated by `algorithms.get(algorithm_id).detector.params_schema`. See `server/routes/presets.py`.
 
 ### Operator audit checklist (when changing wire shapes)
 

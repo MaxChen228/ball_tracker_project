@@ -145,6 +145,26 @@ def _check_legacy_bucket_in_registry() -> None:
 _check_legacy_bucket_in_registry()
 
 
+# Drift guard #3: the iOS live path's cost gate
+# (`IOS_CAPTURE_TIME_COST_THRESHOLD`) must match v11_hsv_cc's
+# `cost_threshold` because the live cost function is v11's cost
+# function (iOS side runs the same area_score blend). If someone
+# tunes v11's threshold without updating the live constant, live
+# emit and server_post v11 emit would diverge on borderline blobs
+# while sharing the same algorithm in name.
+def _check_ios_capture_cost_matches_v11() -> None:
+    v11 = _REGISTRY[V11_HSV_CC].cost_threshold
+    if IOS_CAPTURE_TIME_COST_THRESHOLD != v11:
+        raise RuntimeError(
+            f"IOS_CAPTURE_TIME_COST_THRESHOLD ({IOS_CAPTURE_TIME_COST_THRESHOLD}) "
+            f"must equal v11_hsv_cc cost_threshold ({v11}); the live "
+            "path shares v11's cost function."
+        )
+
+
+_check_ios_capture_cost_matches_v11()
+
+
 def is_valid_id_format(s: str) -> bool:
     """Pure regex check on the slug shape — no registry lookup. Lets
     HTTP handlers split "this string is structurally not an

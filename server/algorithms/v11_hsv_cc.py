@@ -29,13 +29,11 @@ if TYPE_CHECKING:
 
 
 class V11Params(BaseModel):
-    """Per-call params for the V11 detector. The current v11 callsite
-    convention is `{"hsv": payload.hsv, "shape_gate": payload.shape_gate}`
-    because `DetectionConfigSnapshotPayload` happens to expose those
-    same flat fields; this is **not** a permanent registry contract.
-    Future detectors define their own `params_schema` and the snapshot
-    layer is expected to grow a generic `params: dict[str, Any]` slot
-    when a non-v11 algorithm lands."""
+    """Per-call params for the V11 detector. Carries the HSV cube and
+    shape gate the per-frame pipeline applies. `DetectionConfigSnapshotPayload`
+    already exposes `params: dict[str, Any]` per-algorithm, so this
+    schema is what its `params` dict round-trips against when
+    `algorithm_id == "v11_hsv_cc"`."""
     model_config = ConfigDict(extra="forbid")
     hsv: HSVRangePayload
     shape_gate: ShapeGatePayload

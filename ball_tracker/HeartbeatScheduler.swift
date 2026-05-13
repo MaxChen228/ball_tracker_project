@@ -10,9 +10,10 @@ private let log = Logger(subsystem: "com.Max0228.ball-tracker", category: "netwo
 /// Every callback fires on the main queue.
 final class HeartbeatScheduler {
     private var baseIntervalS: TimeInterval
-    /// Mirrored from the camera VC whenever a legacy chirp anchor is set
-    /// or cleared. Stamped onto every outgoing WS heartbeat so the dashboard
-    /// can distinguish "has some anchor" from "has the current sync id".
+    /// Mirrored from the camera VC whenever a chirp / mutual-sync anchor
+    /// is set or cleared. Stamped onto every outgoing WS heartbeat so the
+    /// dashboard can distinguish "has some anchor" from "has the current
+    /// sync id".
     private var timeSyncId: String?
 
     private var pollTimer: Timer?
@@ -40,8 +41,8 @@ final class HeartbeatScheduler {
         self.baseIntervalS = baseIntervalS
     }
 
-    /// Set by the camera VC when a legacy chirp anchor is recorded or
-    /// cleared.
+    /// Set by the camera VC when a chirp / mutual-sync anchor is recorded
+    /// or cleared.
     func updateTimeSyncId(_ syncId: String?) {
         timeSyncId = syncId
     }

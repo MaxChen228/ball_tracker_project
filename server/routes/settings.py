@@ -202,7 +202,7 @@ async def settings_chirp_threshold(request: Request):
 
 @router.post("/settings/mutual_sync_threshold")
 async def settings_mutual_sync_threshold(request: Request):
-    from main import state, device_ws, _settings_message_for, _wants_html
+    from main import state, _wants_html
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
         body = await request.json()
@@ -223,9 +223,12 @@ async def settings_mutual_sync_threshold(request: Request):
         applied = state.set_mutual_sync_threshold(threshold)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await device_ws.broadcast(
-        {cmd.camera_id: _settings_message_for(cmd.camera_id) for cmd in state.online_devices()}
-    )
+    # No `device_ws.broadcast` here: `mutual_sync_threshold` is NOT in the
+    # `_settings_message_for` payload (see main.py — iOS has no client-side
+    # mutual-sync logic; this knob only tunes the server-side two-device
+    # coordinator). A WS push would re-send the unchanged settings dict
+    # and the phone would re-apply the same values, a pure no-op. Operator
+    # changes affect server-side mutual sync trigger logic only.
     if _wants_html(request):
         return RedirectResponse("/", status_code=303)
     return {"ok": True, "value": applied}
