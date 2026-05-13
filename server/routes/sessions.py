@@ -6,18 +6,29 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 import session_results
-from schemas import DetectionPath, SessionResult, _DEFAULT_SESSION_TIMEOUT_S
+from schemas import (
+    DetectionConfigSnapshotPayload,
+    DetectionPath,
+    SessionResult,
+    _DEFAULT_SESSION_TIMEOUT_S,
+)
 
 router = APIRouter()
 
 _SESSION_ID_RE = re.compile(r"^s_[0-9a-f]{4,32}$")
 
 
-# `run_server_post` now picks a preset by name from the request body.
-# This is the single mechanism for "re-detect this session under config
-# X": operator chooses an on-disk preset, server loads it, detect runs.
-# There is no implicit "use whatever the dashboard slider currently
-# shows" — Live and server_post detection are independent choices.
+# Server-post run is keyed by an explicit detection-config snapshot —
+# operator either names a preset (then server loads it) or supplies
+# ad-hoc params (then server validates them against the detector's
+# params_schema). Two endpoints share this path:
+#   - POST /sessions/{sid}/runs/{algorithm_id}: preset XOR params,
+#     algorithm pinned in the URL
+#   - POST /sessions/{sid}/run_server_post: preset-name-only, kept as a
+#     deprecation alias for HTML form callers (events row + viewer rerun)
+# Both end up calling `_dispatch_server_post` with the same snapshot
+# shape — there is no implicit "use whatever the dashboard slider
+# currently shows" anywhere.
 
 
 def _unknown_detection_paths(raw_paths: list[object]) -> list[str]:
@@ -204,47 +215,26 @@ async def sessions_cancel_processing(request: Request, session_id: str):
     return {"ok": True, "session_id": session_id}
 
 
-@router.post("/sessions/{session_id}/run_server_post")
-async def sessions_run_server_post(
-    request: Request,
-    session_id: str,
-    background_tasks: BackgroundTasks,
-):
-    """Operator-triggered: run server-side HSV detection against every
-    camera's archived MOV for this session, using the named preset from
-    the request body.
-
-    Body (JSON or form): `preset_name` — required, must be an existing
-    preset slug under `data/presets/`. The named preset's full
-    detection-config snapshot is loaded into the background detection
-    job; the operator's dashboard active preset is irrelevant to this
-    run. The resulting `SessionResult.server_post_config_used` carries
-    the exact HSV + shape-gate + preset identity that produced the
-    rerun; re-running with a different preset overwrites both the
-    detection results and that snapshot.
-    """
-    return await _enqueue_server_post(request, session_id, background_tasks)
-
-
-async def _enqueue_server_post(
-    request: Request,
-    session_id: str,
-    background_tasks: BackgroundTasks,
-):
-    from main import state, _wants_html, _run_server_detection
-    if not _SESSION_ID_RE.match(session_id):
-        if _wants_html(request):
-            return RedirectResponse("/", status_code=303)
-        raise HTTPException(status_code=422, detail="invalid session_id")
+async def _parse_request_body(request: Request) -> dict:
+    """Parse a JSON or form-encoded body into a plain dict. Empty body
+    returns an empty dict. JSON bodies that decode to anything other
+    than a dict raise 400."""
     ctype = request.headers.get("content-type", "").lower()
     if "application/json" in ctype:
-        body = await request.json() if await request.body() else {}
+        if not await request.body():
+            return {}
+        body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="body must be a JSON object")
-        preset_name = body.get("preset_name")
-    else:
-        form = await request.form()
-        preset_name = form.get("preset_name")
+        return body
+    form = await request.form()
+    return {k: form.get(k) for k in form}
+
+
+def _snapshot_from_preset_name(state, preset_name: object) -> DetectionConfigSnapshotPayload:
+    """Build a snapshot by looking up a preset by slug. Used by the
+    deprecation-alias endpoint where the algorithm id is implied by the
+    preset itself (not pinned in the URL)."""
     if not isinstance(preset_name, str) or not preset_name:
         raise HTTPException(
             status_code=422,
@@ -254,6 +244,112 @@ async def _enqueue_server_post(
         preset = state.load_preset(preset_name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown preset: {preset_name!r}")
+    return DetectionConfigSnapshotPayload(
+        algorithm_id=preset.algorithm_id,
+        params=dict(preset.params),
+        preset_name=preset_name,
+    )
+
+
+def _snapshot_for_algorithm(
+    state,
+    url_algorithm_id: str,
+    body: dict,
+) -> DetectionConfigSnapshotPayload:
+    """Build a snapshot for an URL-pinned algorithm. Body must carry
+    exactly one of `preset_name` (str) or `params` (dict).
+
+    Error matrix:
+      - URL slug malformed → 400
+      - URL algorithm unknown → 404
+      - URL algorithm is a non-runnable data source → 422
+      - body has neither preset_name nor params → 422
+      - body has both → 422
+      - preset_name unknown → 404
+      - preset.algorithm_id mismatches URL → 422
+      - params fail detector.params_schema → 422
+    """
+    import algorithms
+    from pydantic import ValidationError
+
+    if not algorithms.is_valid_id_format(url_algorithm_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid algorithm_id {url_algorithm_id!r}: must match [a-z0-9_]{{1,32}}",
+        )
+    if not algorithms.is_known(url_algorithm_id):
+        if url_algorithm_id in algorithms.NON_RUNNABLE_IDS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"algorithm_id {url_algorithm_id!r} is a non-runnable "
+                    "data source — cannot be invoked via this endpoint"
+                ),
+            )
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown algorithm_id {url_algorithm_id!r}",
+        )
+
+    preset_name = body.get("preset_name")
+    params = body.get("params")
+    have_preset = isinstance(preset_name, str) and len(preset_name) > 0
+    have_params = isinstance(params, dict)
+
+    if have_preset and have_params:
+        raise HTTPException(
+            status_code=422,
+            detail="preset_name and params are mutually exclusive",
+        )
+    if not have_preset and not have_params:
+        raise HTTPException(
+            status_code=422,
+            detail="must supply preset_name or params",
+        )
+
+    if have_preset:
+        snapshot = _snapshot_from_preset_name(state, preset_name)
+        if snapshot.algorithm_id != url_algorithm_id:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"preset {preset_name!r} is for algorithm "
+                    f"{snapshot.algorithm_id!r}, but URL specifies "
+                    f"{url_algorithm_id!r}"
+                ),
+            )
+        return snapshot
+
+    entry = algorithms.get(url_algorithm_id)
+    try:
+        entry.detector.params_schema.model_validate(params)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"params failed schema for {url_algorithm_id!r}: {exc}",
+        )
+    return DetectionConfigSnapshotPayload(
+        algorithm_id=url_algorithm_id,
+        params=dict(params),
+        preset_name=None,
+    )
+
+
+async def _dispatch_server_post(
+    request: Request,
+    session_id: str,
+    snapshot: DetectionConfigSnapshotPayload,
+    background_tasks: BackgroundTasks,
+):
+    """Shared tail used by both server-post endpoints: validate session
+    id, gate on `processing.session_candidates`, queue
+    `_run_server_detection` for every cam under the same snapshot.
+    Caller supplies the snapshot."""
+    from main import state, _wants_html, _run_server_detection
+    if not _SESSION_ID_RE.match(session_id):
+        if _wants_html(request):
+            return RedirectResponse("/", status_code=303)
+        raise HTTPException(status_code=422, detail="invalid session_id")
     candidates = state.processing.session_candidates(session_id)
     if not candidates:
         if _wants_html(request):
@@ -264,15 +360,6 @@ async def _enqueue_server_post(
         if _wants_html(request):
             return RedirectResponse("/", status_code=303)
         raise HTTPException(status_code=409, detail="no resumable processing")
-    from schemas import DetectionConfigSnapshotPayload
-    # Preset and snapshot share canonical `(algorithm_id, params)`
-    # shape — passthrough with a defensive copy so later snapshot
-    # mutation can't bleed into the preset.
-    snapshot = DetectionConfigSnapshotPayload(
-        algorithm_id=preset.algorithm_id,
-        params=dict(preset.params),
-        preset_name=preset_name,
-    )
     for clip_path, pitch in queued:
         background_tasks.add_task(
             _run_server_detection,
@@ -286,8 +373,54 @@ async def _enqueue_server_post(
         "ok": True,
         "session_id": session_id,
         "queued": len(queued),
-        "preset_name": preset_name,
+        "algorithm_id": snapshot.algorithm_id,
+        "preset_name": snapshot.preset_name,
     }
+
+
+@router.post("/sessions/{session_id}/runs/{algorithm_id}")
+async def sessions_run_algorithm(
+    request: Request,
+    session_id: str,
+    algorithm_id: str,
+    background_tasks: BackgroundTasks,
+):
+    """Run `algorithm_id` against every archived MOV for this session.
+
+    Body (JSON or form) XOR:
+      - `preset_name: str` — load that preset from disk; preset's
+        `algorithm_id` must match the URL or 422.
+      - `params: dict` — ad-hoc one-off run, validated against the
+        detector's `params_schema`; snapshot's `preset_name` is null.
+
+    The resulting `SessionResult.config_used_by_algorithm[algorithm_id]`
+    carries the exact `(algorithm_id, params, preset_name)` that
+    produced this run. Re-running the same algorithm on the same
+    session overwrites that bucket; running a different algorithm
+    leaves prior algorithm buckets in place (multi-algorithm history
+    is preserved at the dict layer)."""
+    from main import state
+    body = await _parse_request_body(request)
+    snapshot = _snapshot_for_algorithm(state, algorithm_id, body)
+    return await _dispatch_server_post(request, session_id, snapshot, background_tasks)
+
+
+@router.post("/sessions/{session_id}/run_server_post")
+async def sessions_run_server_post(
+    request: Request,
+    session_id: str,
+    background_tasks: BackgroundTasks,
+):
+    """[Deprecation alias] Prefer `POST /sessions/{sid}/runs/{algorithm_id}`.
+
+    Kept for HTML form callers (events-row "Run srv" button + viewer
+    "Rerun server" button), which submit `preset_name` only. The
+    snapshot's `algorithm_id` is derived from the preset, then routed
+    through the same `_dispatch_server_post` as the new endpoint."""
+    from main import state
+    body = await _parse_request_body(request)
+    snapshot = _snapshot_from_preset_name(state, body.get("preset_name"))
+    return await _dispatch_server_post(request, session_id, snapshot, background_tasks)
 
 
 @router.post("/sessions/{session_id}/recompute")
