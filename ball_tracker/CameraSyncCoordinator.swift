@@ -38,8 +38,11 @@ final class CameraSyncCoordinator {
 
     private var syncAudio: MutualSyncAudio?
     private var pendingSyncId: String?
-    private var pendingSyncEmitAtS: [Double] = [0.3]
-    private var pendingSyncRecordDurationS: Double = 3.0
+    // No boot default — these MUST be written by `applyMutualSync` before
+    // `startMutualSync` reads them. A silent default would mask a missing
+    // server push and run with timing that disagrees with server logs.
+    private var pendingSyncEmitAtS: [Double]?
+    private var pendingSyncRecordDurationS: Double?
     private var syncWatchdog: DispatchWorkItem?
 
     init(dependencies: Dependencies) {
@@ -100,7 +103,7 @@ final class CameraSyncCoordinator {
         deps.refreshUI()
     }
 
-    func applyMutualSync(syncId: String, emitAtS: [Double] = [0.3], recordDurationS: Double = 3.0) {
+    func applyMutualSync(syncId: String, emitAtS: [Double], recordDurationS: Double) {
         guard deps.getState() == .standby else {
             syncLog.warning("sync_run ignored state=\(CameraViewController.stateText(self.deps.getState()), privacy: .public) sync_id=\(syncId, privacy: .public)")
             deps.uploader().postSyncLog(event: "ignored", detail: [
@@ -220,7 +223,18 @@ final class CameraSyncCoordinator {
         lastSyncAnchor = nil
         deps.healthMonitor()?.updateTimeSyncId(nil)
 
-        let audio = deps.makeMutualSyncAudio(pendingSyncEmitAtS, pendingSyncRecordDurationS)
+        // Invariant: applyMutualSync (the only public entry into the
+        // sync flow) writes both pending fields before calling here.
+        // Empty / sub-floor values are atomic-dropped by the router and
+        // additionally asserted in applyMutualSync, so unwrapping with
+        // precondition makes the invariant explicit instead of substituting
+        // a silent default that would disagree with server-pushed timing.
+        guard let emitAtS = pendingSyncEmitAtS,
+              let recordDurationS = pendingSyncRecordDurationS else {
+            preconditionFailure("startMutualSync called without pendingSyncEmitAtS / pendingSyncRecordDurationS — applyMutualSync must write both before transitioning to mutualSyncing")
+        }
+
+        let audio = deps.makeMutualSyncAudio(emitAtS, recordDurationS)
         syncAudio = audio
         deps.uploader().postSyncLog(event: "recording_started", detail: [
             "role": .string(role),
@@ -246,7 +260,7 @@ final class CameraSyncCoordinator {
             }
         )
 
-        let timeoutS = pendingSyncRecordDurationS + 3.0
+        let timeoutS = recordDurationS + 3.0
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.deps.getState() == .mutualSyncing else { return }
             self.abortMutualSync(reason: "timeout")
