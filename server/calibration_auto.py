@@ -24,10 +24,13 @@ on any FastAPI router / Request machinery.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import numpy as np
 from fastapi import HTTPException
+
+logger = logging.getLogger("ball_tracker")
 
 from calibration_solver import (
     PLATE_MARKER_WORLD,
@@ -153,8 +156,19 @@ def _triangulate_marker_candidates(
 
     K_a, R_a, C_a = _marker_camera_pose(snap_a)
     K_b, R_b, C_b = _marker_camera_pose(snap_b)
-    dist_a = np.asarray(snap_a.intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
-    dist_b = np.asarray(snap_b.intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+    # Explicit None → zeros materialization; see `_solve_pnp_homography`
+    # for the rationale (avoid conflating "no distortion model" with
+    # "all-zero distortion model" at read sites).
+    dist_a = (
+        np.zeros(5, dtype=np.float64)
+        if snap_a.intrinsics.distortion is None
+        else np.asarray(snap_a.intrinsics.distortion, dtype=np.float64)
+    )
+    dist_b = (
+        np.zeros(5, dtype=np.float64)
+        if snap_b.intrinsics.distortion is None
+        else np.asarray(snap_b.intrinsics.distortion, dtype=np.float64)
+    )
 
     det_a = {m.id: m for m in detect_all_markers_in_dict(bgr_a)}
     det_b = {m.id: m for m in detect_all_markers_in_dict(bgr_b)}
@@ -236,6 +250,15 @@ def _solve_pnp_homography(
     markers_by_id = {m.id: m for m in detected if m.id in world_xyz}
     detected_ids = sorted(markers_by_id.keys())
     if len(detected_ids) < 4:
+        # Operator-facing reason: PnP needs ≥ 4 non-colinear correspondences.
+        # Caller will fall back to the 4-marker planar homography solver.
+        # Logging here so dashboard logs distinguish "expected — only plate
+        # markers visible" from numerical degeneracy below.
+        logger.warning(
+            "_solve_pnp_homography: PnP needs >=4 markers, got %d (ids=%s) "
+            "— falling back to planar homography",
+            len(detected_ids), detected_ids,
+        )
         return None
     object_pts = np.array([world_xyz[mid] for mid in detected_ids], dtype=np.float64)
     image_pts = np.array(
@@ -243,9 +266,24 @@ def _solve_pnp_homography(
         dtype=np.float64,
     )
     if np.linalg.matrix_rank(object_pts - object_pts.mean(axis=0, keepdims=True)) < 3:
+        # All marker world coordinates are colinear (or coplanar in a way
+        # PnP can't disambiguate) — geometry failure, not a "missing
+        # extended markers" case. Distinct WARN so operator can tell.
+        logger.warning(
+            "_solve_pnp_homography: degenerate marker geometry rank<3 "
+            "(ids=%s) — falling back to planar homography",
+            detected_ids,
+        )
         return None
     K = build_K(intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy).astype(np.float64)
-    dist = np.asarray(intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+    # Materialize distortion None → zero-vec explicitly so callers can't
+    # confuse "no distortion model on this snapshot" with "distortion model
+    # is all zero". OpenCV treats them identically downstream; the
+    # explicit form documents the intent.
+    if intrinsics.distortion is None:
+        dist = np.zeros(5, dtype=np.float64)
+    else:
+        dist = np.asarray(intrinsics.distortion, dtype=np.float64)
     ok, rvec, tvec, inliers = cv2.solvePnPRansac(
         object_pts,
         image_pts,
@@ -257,18 +295,35 @@ def _solve_pnp_homography(
         confidence=0.995,
     )
     if not ok:
+        logger.warning(
+            "solvePnPRansac failed despite %d non-colinear points (ids=%s) "
+            "— falling back to planar homography",
+            len(detected_ids), detected_ids,
+        )
         return None
     rvec, tvec = cv2.solvePnPRefineLM(object_pts, image_pts, K, dist, rvec, tvec)
     R_wc, _ = cv2.Rodrigues(rvec)
     H = K @ np.column_stack([R_wc[:, 0], R_wc[:, 1], tvec.reshape(3)])
     if abs(H[2, 2]) < 1e-12:
+        logger.warning(
+            "_solve_pnp_homography: h33 ~= 0 (camera on plate plane?) "
+            "(ids=%s) — falling back to planar homography",
+            detected_ids,
+        )
         return None
     H = H / H[2, 2]
-    inlier_ids = (
-        [detected_ids[int(i)] for i in inliers.flatten().tolist()]
-        if inliers is not None
-        else detected_ids
-    )
+    # RANSAC returning `inliers is None` should not happen on `ok=True`;
+    # treat it as a contract violation and log loudly rather than silently
+    # claiming every correspondence is an inlier.
+    if inliers is None:
+        logger.warning(
+            "solvePnPRansac returned ok=True but inliers=None "
+            "(ids=%s) — OpenCV contract violation, treating all as inliers",
+            detected_ids,
+        )
+        inlier_ids = list(detected_ids)
+    else:
+        inlier_ids = [detected_ids[int(i)] for i in inliers.flatten().tolist()]
     return H.flatten().tolist(), inlier_ids
 
 
@@ -362,23 +417,32 @@ def _video_basis_intrinsics(
 ) -> tuple[IntrinsicsPayload, float, float]:
     """Build canonical 1920×1080 video-basis K from a photo-basis solve.
 
-    Pure FOV path (`intrinsics_source != "charuco"` or no `photo_fov_deg`):
+    Pure FOV path (no prior intrinsics, or no `photo_fov_deg`):
     K is `derive_fov_intrinsics(1920, 1080, video_fov)` — pinhole
     approximation, fx ≈ 1278 on iPhone main 1.0×.
 
-    ChArUco carry-over path (`intrinsics_source == "charuco"` and
+    Carry-over path (`intrinsics_source ∈ {"charuco", "snapshot"}` and
     `photo_fov_deg` is known):
 
-        correction_x = fx_charuco / fx_fov_at_photo_basis
+        correction_x = fx_prior / fx_fov_at_photo_basis
         fx_video    = fx_fov_at_video_basis × correction_x
 
     The correction factor captures "this device's measured fx is X %
     off the iOS-reported nominal photo FOV". We assume that deviation is
     basis-invariant — same physical optics, the photo↔video format swap
     only changes sensor crop + binning, not focal length in metric units.
-    Without this carry-over the rebuild path silently degrades ChArUco
-    precision (RMS ~0.5 px in pixels) to pure FOV approximation (~1-3 %
-    fx error, per CLAUDE.md / docs/iphone_camera_formats.md).
+    Without this carry-over the rebuild path silently degrades the prior
+    precision (ChArUco RMS ~0.5 px, or a previously-converged auto-cal
+    snapshot's accumulated fx/fy) to pure FOV approximation (~1-3 % fx
+    error, per CLAUDE.md / docs/iphone_camera_formats.md).
+
+    The `"snapshot"` branch matters operationally: per CLAUDE.md, every
+    recalibration must "preserve existing intrinsics, only update
+    homography". `_derive_auto_cal_intrinsics` reuses prior K via the
+    snapshot path, but if this rebuild then dropped the correction
+    factor we'd silently regress to pure-FOV — every recal would nudge
+    K back toward the FOV baseline, contradicting the documented
+    invariant.
 
     cx/cy land at the canonical image center because we have no
     cross-basis ground truth for the principal point — iPhone main cams
@@ -400,7 +464,13 @@ def _video_basis_intrinsics(
     fx_correction = 1.0
     fy_correction = 1.0
     fx, fy = fx_fov_v, fy_fov_v
-    if intrinsics_source == "charuco" and photo_fov_deg is not None:
+    # Carry the per-device fx/fy correction across the photo→video basis
+    # swap for both ChArUco priors (per-device measured ~0.5 px RMS) AND
+    # cached CalibrationSnapshots (a previous auto-cal's converged
+    # intrinsics). Treating snapshot the same as charuco upholds the
+    # "preserve intrinsics, only update homography" invariant — otherwise
+    # snapshot-reuse silently drops back to pure FOV at canonical rebuild.
+    if intrinsics_source in ("charuco", "snapshot") and photo_fov_deg is not None:
         photo_fov_rad = float(np.radians(photo_fov_deg))
         w_img, h_img = photo_dims
         fx_fov_p, fy_fov_p, _, _ = derive_fov_intrinsics(
@@ -488,7 +558,11 @@ def _reprojection_error_px(
     H_mat = np.array(homography_row_major, dtype=np.float64).reshape(3, 3)
     R_wc, t_wc = recover_extrinsics(K, H_mat)
     rvec, _ = cv2.Rodrigues(R_wc)
-    dist = np.asarray(intrinsics.distortion or [0, 0, 0, 0, 0], dtype=np.float64)
+    dist = (
+        np.zeros(5, dtype=np.float64)
+        if intrinsics.distortion is None
+        else np.asarray(intrinsics.distortion, dtype=np.float64)
+    )
     errs: list[float] = []
     for m in detected:
         if m.id not in world_xyz:
@@ -689,7 +763,25 @@ async def _run_auto_calibration(
     reproj_px = _reprojection_error_px(
         intrinsics, result.homography_row_major, detected,
     )
-    if reproj_px is not None and reproj_px > REPROJ_FAIL_PX:
+    # `None` means `_reprojection_error_px` couldn't find a single
+    # detected marker whose world coords are known — silently bypassing
+    # the ceiling here would let a bogus homography through the quality
+    # gate. Treat it as a hard failure so the operator re-aims.
+    if reproj_px is None:
+        if track_run:
+            state.append_auto_cal_event(
+                camera_id, "reproj not computable", level="warn",
+                data={"detected_ids": sorted(m.id for m in detected)},
+            )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "reprojection error not computable — no detected marker IDs "
+                "match known world coordinates (plate or extended). Re-aim "
+                "the lens at the plate before retrying."
+            ),
+        )
+    if reproj_px > REPROJ_FAIL_PX:
         if track_run:
             state.append_auto_cal_event(
                 camera_id, "reproj above ceiling", level="warn",
@@ -835,10 +927,15 @@ async def _run_auto_calibration(
             fy_correction=fy_correction,
         ),
     )
+    # Legacy multi-frame fields kept for dashboard/HTML compatibility.
+    # Single-shot auto-cal always processes exactly one frame; "good" =
+    # markers detected (we reached this return), "stable" = reproj
+    # passed the dashboard's "looks good" threshold (5 px is the same
+    # cutoff used by `_residual_bucket("good")`'s reproj sibling).
     return {
         "frames_seen": 1,
         "good_frames": 1,
-        "stable_frames": 1,
+        "stable_frames": int(reproj_px <= 5.0),
         "intrinsics": intrinsics,
         "result": result,
         "solver": solver,
