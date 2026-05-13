@@ -118,7 +118,20 @@ class SessionProcessingState:
         self.server_post_jobs[key] = "queued"
 
     def start_job(self, key: JobKey) -> bool:
-        if self.is_trashed(key[1]):
+        # Caller (`start_server_post_job`) holds `self._lock`. Pre-write
+        # existence guard: refuse to start a server_post job on a session
+        # that has been deleted from `owner.pitches`. `delete_session`
+        # purges `server_post_jobs[(cam,sid)]` already, but a routes
+        # caller that captured a `pitch_copy` BEFORE delete could land
+        # here with a phantom (cam,sid) — without this guard we'd flip
+        # the entry back to "processing" and run detection against a
+        # vanished session, eventually crashing on `state.record()`'s
+        # own resurrection guard.
+        _cam, sid = key
+        owner = self._owner
+        if owner is not None and not any(s == sid for _, s in owner.pitches):
+            return False
+        if self.is_trashed(sid):
             return False
         status = self.server_post_jobs.get(key)
         if status == "canceled":

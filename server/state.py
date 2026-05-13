@@ -223,6 +223,17 @@ class State:
         # on disk via `pitches` / `results` for any consumer that needs
         # historical reconstruction.
         self._recently_ended_sessions: deque[Session] = deque(maxlen=4)
+        # Tombstones for sessions explicitly deleted via `delete_session`.
+        # `record()` checks this before publishing a pitch so a stale
+        # upload (e.g., iOS retry from PayloadUploadQueue after operator
+        # deleted the session on the dashboard) cannot resurrect the
+        # session on disk + in memory. Bounded — older tombstones age
+        # out once 256 deletions have happened, well beyond any realistic
+        # in-flight upload retry horizon. Tombstones are NOT persisted
+        # across restart: server restart already invalidates iOS retry
+        # queues by the heartbeat reconnect handshake, so the in-memory
+        # bound is sufficient.
+        self._deleted_session_tombstones: deque[str] = deque(maxlen=256)
         # Per-camera calibration snapshots. Written by POST /calibration,
         # read by the dashboard canvas so the 3D preview shows where each
         # phone "thinks it is" relative to the plate, independent of any
@@ -708,8 +719,14 @@ class State:
             _presets.load_preset(
                 self._data_dir, name, atomic_write=self._atomic_write
             )
+            # Write-then-mutate: persist sidecar first, then update the
+            # in-memory pointer. On disk failure the operator's previous
+            # choice survives instead of in-memory drift vs disk.
+            self._atomic_write(
+                self._active_server_post_preset_path,
+                json.dumps({"name": name}),
+            )
             self._active_server_post_preset_name = name
-            self._persist_active_server_post_preset_locked()
             return self._active_server_post_preset_name
 
     def _load_pairing_tuning_from_disk(self) -> PairingTuning:
@@ -1088,9 +1105,23 @@ class State:
         # result file) can't clobber each other's in-flight tmp before the
         # rename. Each caller writes its own tmp then atomically replaces
         # `path`; last writer wins on `path` (deterministic content).
+        #
+        # On any write failure (disk full, permissions, KeyboardInterrupt
+        # mid-write, etc.) the tmp file must be unlinked or it accumulates
+        # forever as `.<token>.tmp` siblings — eats inodes long-term and
+        # confuses `delete_session`'s `*.tmp` glob which assumes tmps are
+        # in-flight not abandoned.
         tmp = path.with_suffix(path.suffix + f".{secrets.token_hex(4)}.tmp")
-        tmp.write_text(payload)
-        tmp.replace(path)
+        try:
+            tmp.write_text(payload)
+            tmp.replace(path)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                # Best-effort cleanup; surface the original failure.
+                pass
+            raise
 
     def record(self, pitch: PitchPayload) -> SessionResult:
         """Persist a pitch upload and, if its pair is already present,
@@ -1127,78 +1158,141 @@ class State:
             normalized_paths = session_results.paths_for_pitch(self, pitch)
         pitch.paths = sorted(p.value for p in normalized_paths)
 
-        # --- Critical section 1: mutate pitches + drive session FSM. ---
-        # Grab the pair snapshot here so triangulation below runs against a
-        # consistent view without re-entering the lock.
+        # --- CS0 (read-only snapshot): tombstone guard + build merged.
+        # Pre-write existence guard. `delete_session` drops a tombstone
+        # for the deleted sid; a stale upload (iOS retry from
+        # `PayloadUploadQueue` after operator deleted the session, or
+        # an in-flight `_run_server_detection` that finished after
+        # delete) must not silently resurrect the session on disk + in
+        # memory. Refuse — return a synthetic SessionResult with
+        # `error="session_deleted_during_record"` so callers don't
+        # silently shadow a real result with a shell.
+        #
+        # NOT used as guard: "is sid known to pitches/results/sessions?"
+        # — that would block first-record of a session that's been
+        # armed-then-recorded via the normal path. Only the tombstone
+        # set proves a session was explicitly deleted.
+        sid = pitch.session_id
+        cam = pitch.camera_id
         with self._lock:
-            existing = self.pitches.get((pitch.camera_id, pitch.session_id))
+            if sid in self._deleted_session_tombstones:
+                logger.warning(
+                    "record: session %s was deleted before record() — "
+                    "refusing to resurrect (cam=%s)",
+                    sid, cam,
+                )
+                return SessionResult(
+                    session_id=sid,
+                    camera_a_received=False,
+                    camera_b_received=False,
+                    error="session_deleted_during_record",
+                )
+            existing = self.pitches.get((cam, sid))
             live_frames = session_results.live_frames_for_camera_locked(
-                self, pitch.session_id, pitch.camera_id,
+                self, sid, cam,
             )
-            merged = pitch.model_copy(deep=True)
-            if existing is not None:
-                # Dict-level merge: existing buckets that the incoming
-                # pitch lacks must survive. Running v11→v12 would
-                # otherwise lose v11's accumulated frames (incoming
-                # writer typically rebuilds the pitch from current
-                # snapshot only). Incoming wins on key collision
-                # (latest write); missing keys carry over from existing.
-                # Same union logic for config_used_by_algorithm.
-                for alg_id, frames in existing.frames_by_algorithm.items():
-                    if alg_id not in merged.frames_by_algorithm:
-                        # Deep-copy each frame so any future in-place
-                        # mutation on `merged` cannot bleed back into
-                        # the cached `existing` (FramePayload is not
-                        # frozen).
-                        merged.frames_by_algorithm[alg_id] = [
-                            f.model_copy(deep=True) for f in frames
-                        ]
-                for alg_id, snap in existing.config_used_by_algorithm.items():
-                    if alg_id not in merged.config_used_by_algorithm:
-                        merged.config_used_by_algorithm[alg_id] = snap.model_copy(deep=True)
-                # Preserve the active server_post pointer when incoming
-                # didn't carry one (e.g. live-frames merge after a
-                # server_post run had already stamped the pointer).
-                if (
-                    merged.active_server_post_algorithm_id is None
-                    and existing.active_server_post_algorithm_id is not None
-                ):
-                    merged.active_server_post_algorithm_id = (
-                        existing.active_server_post_algorithm_id
-                    )
-                # Preserve the previous run's wall-clock when the
-                # incoming pitch doesn't carry one (e.g., live-frames
-                # merge after server_post had already completed).
-                if merged.server_post_ran_at is None and existing.server_post_ran_at is not None:
-                    merged.server_post_ran_at = existing.server_post_ran_at
-                # Preserve the original creation stamp across re-records
-                # (server_post backfill, live merge). If the existing record
-                # lacked one (legacy / synthetic before this field shipped),
-                # fall through and stamp now.
-                if existing.created_at is not None:
-                    merged.created_at = existing.created_at
-            if merged.created_at is None:
-                merged.created_at = self._time_fn()
-            if not merged.frames_live and live_frames:
-                merged.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(live_frames)
-            pitch = merged
+            existing_snapshot = (
+                existing.model_copy(deep=True) if existing is not None else None
+            )
+
+        # --- Outside the lock: build the merged pitch. Pure CPU; no
+        # state mutation. ---
+        merged = pitch.model_copy(deep=True)
+        if existing_snapshot is not None:
+            # Dict-level merge: existing buckets that the incoming
+            # pitch lacks must survive. Running v11→v12 would
+            # otherwise lose v11's accumulated frames (incoming
+            # writer typically rebuilds the pitch from current
+            # snapshot only). Incoming wins on key collision
+            # (latest write); missing keys carry over from existing.
+            # Same union logic for config_used_by_algorithm.
+            for alg_id, frames in existing_snapshot.frames_by_algorithm.items():
+                if alg_id not in merged.frames_by_algorithm:
+                    # Deep-copy each frame so any future in-place
+                    # mutation on `merged` cannot bleed back into
+                    # the cached `existing` (FramePayload is not
+                    # frozen).
+                    merged.frames_by_algorithm[alg_id] = [
+                        f.model_copy(deep=True) for f in frames
+                    ]
+            for alg_id, snap in existing_snapshot.config_used_by_algorithm.items():
+                if alg_id not in merged.config_used_by_algorithm:
+                    merged.config_used_by_algorithm[alg_id] = snap.model_copy(deep=True)
+            # Preserve the active server_post pointer when incoming
+            # didn't carry one (e.g. live-frames merge after a
+            # server_post run had already stamped the pointer).
+            if (
+                merged.active_server_post_algorithm_id is None
+                and existing_snapshot.active_server_post_algorithm_id is not None
+            ):
+                merged.active_server_post_algorithm_id = (
+                    existing_snapshot.active_server_post_algorithm_id
+                )
+            # Preserve the previous run's wall-clock when the
+            # incoming pitch doesn't carry one (e.g., live-frames
+            # merge after server_post had already completed).
+            if merged.server_post_ran_at is None and existing_snapshot.server_post_ran_at is not None:
+                merged.server_post_ran_at = existing_snapshot.server_post_ran_at
+            # Preserve the original creation stamp across re-records
+            # (server_post backfill, live merge). If the existing record
+            # lacked one (legacy / synthetic before this field shipped),
+            # fall through and stamp now.
+            if existing_snapshot.created_at is not None:
+                merged.created_at = existing_snapshot.created_at
+        if merged.created_at is None:
+            merged.created_at = self._time_fn()
+        if not merged.frames_live and live_frames:
+            merged.frames_by_algorithm[IOS_CAPTURE_TIME_ALGORITHM_ID] = list(live_frames)
+        pitch = merged
+
+        # --- Outside the lock: write pitch JSON FIRST, before mutating
+        # the in-memory map. Filename is unique per (camera, session) and
+        # each pitch uses its own tmp file, so two concurrent calls here
+        # cannot collide. If `_atomic_write` raises (disk full, perm,
+        # etc.) the in-memory `self.pitches` stays consistent with disk.
+        # ---
+        self._atomic_write(pitch_path, persist_pitch_json(pitch))
+
+        # --- CS1 (publish): tombstone re-check + mutate pitches map +
+        # drive session FSM. A concurrent `delete_session` could have
+        # raced between CS0 and now, dropping a tombstone while we
+        # wrote disk. If so: unlink the just-written pitch JSON
+        # (delete_session already glob-purged but we re-wrote
+        # afterwards) and bail without resurrecting `self.pitches`.
+        with self._lock:
+            sid = pitch.session_id
+            cam = pitch.camera_id
+            tombstoned = sid in self._deleted_session_tombstones
+            if tombstoned:
+                logger.warning(
+                    "record: session %s deleted between CS0 and CS1 — "
+                    "discarding pitch publish (cam=%s)",
+                    sid, cam,
+                )
+        if tombstoned:
+            try:
+                pitch_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return SessionResult(
+                session_id=sid,
+                camera_a_received=False,
+                camera_b_received=False,
+                error="session_deleted_during_record",
+            )
+        with self._lock:
             self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
+            # Refresh the mtime cache so state_events.build_events can
+            # skip the per-row stat(). Using _time_fn() (write moment)
+            # instead of path.stat().st_mtime avoids an extra syscall
+            # and matches the ordering need — the value is only ever
+            # compared against other cached values within build_events.
+            self._pitch_mtime_cache[(pitch.camera_id, pitch.session_id)] = self._time_fn()
             # Drive the session state machine forward — any upload arriving
             # while armed disarms the session (one-shot pattern). The other
             # camera, if it was also recording, gets "disarm" on the next
             # WS settings push and cleans up.
             self._register_upload_in_session_locked(pitch)
-
-        # --- Outside the lock: write pitch JSON. Filename is unique per
-        # (camera, session) and each pitch uses its own tmp file, so two
-        # concurrent calls here cannot collide. ---
-        self._atomic_write(pitch_path, persist_pitch_json(pitch))
-        # Refresh the mtime cache so state_events.build_events can skip
-        # the per-row stat(). Using _time_fn() (write moment) instead of
-        # path.stat().st_mtime avoids an extra syscall and matches the
-        # ordering need — the value is only ever compared against other
-        # cached values within build_events.
-        self._pitch_mtime_cache[(pitch.camera_id, pitch.session_id)] = self._time_fn()
 
         # --- Outside the lock: build the result + triangulate if paired. ---
         result = session_results.rebuild_result_for_session(self, pitch.session_id)
@@ -1397,41 +1491,51 @@ class State:
                 f"{algorithm_id!r} is the live bucket; not a server_post run"
             )
         with self._lock:
-            cam_pitches = [
+            existing_pitches = [
                 p for (_cam, sid), p in self.pitches.items()
                 if sid == session_id
             ]
-            if not cam_pitches:
+            if not existing_pitches:
                 raise KeyError(f"session {session_id!r} has no pitches")
             if not any(
-                algorithm_id in p.frames_by_algorithm for p in cam_pitches
+                algorithm_id in p.frames_by_algorithm for p in existing_pitches
             ):
                 raise ValueError(
                     f"algorithm {algorithm_id!r} has no frames in session "
                     f"{session_id!r}"
                 )
-            for p in cam_pitches:
-                p.active_server_post_algorithm_id = algorithm_id
+            # Deep-copy under the lock; we'll mutate the copies outside.
+            # Mutating the live entries here would desync from disk if
+            # any of the _atomic_write calls below raised.
+            new_pitches = [p.model_copy(deep=True) for p in existing_pitches]
+        for p in new_pitches:
+            p.active_server_post_algorithm_id = algorithm_id
 
-        for pitch in cam_pitches:
+        # Write all updated pitches to disk FIRST. If any write fails,
+        # the in-memory map keeps the old pointer; on success we publish
+        # the new copies atomically under the lock below.
+        for pitch in new_pitches:
             self._atomic_write(
                 self._pitch_path(pitch.camera_id, pitch.session_id),
                 persist_pitch_json(pitch),
             )
-        result = session_results.rebuild_result_for_session(self, session_id)
 
         with self._lock:
             still_present = any(
                 (p.camera_id, p.session_id) in self.pitches
-                for p in cam_pitches
+                for p in new_pitches
             )
-        if not still_present:
-            logger.info(
-                "set_active_server_post_algorithm: session %s deleted "
-                "during write — discarding result publish",
-                session_id,
-            )
-            return None
+            if not still_present:
+                logger.info(
+                    "set_active_server_post_algorithm: session %s deleted "
+                    "during write — discarding result publish",
+                    session_id,
+                )
+                return None
+            for pitch in new_pitches:
+                self.pitches[(pitch.camera_id, pitch.session_id)] = pitch
+
+        result = session_results.rebuild_result_for_session(self, session_id)
 
         self._atomic_write(
             self._result_path(session_id),
@@ -1440,7 +1544,7 @@ class State:
         with self._lock:
             if not any(
                 (p.camera_id, p.session_id) in self.pitches
-                for p in cam_pitches
+                for p in new_pitches
             ):
                 logger.info(
                     "set_active_server_post_algorithm: session %s deleted "
@@ -1889,8 +1993,17 @@ class State:
             if cfg.preset is not None:
                 if not _presets.preset_exists(self._data_dir, cfg.preset):
                     raise KeyError(cfg.preset)
-            self._detection_config = cfg.with_(last_applied_at=self._time_fn())
-            self._persist_detection_config_locked()
+            # Write-then-mutate: build the new value, persist it
+            # atomically, and only on disk-success update in-memory
+            # state. On disk failure (full disk, perm error) the in-
+            # memory `_detection_config` stays in sync with disk.
+            new_cfg = cfg.with_(last_applied_at=self._time_fn())
+            _detection_config_persist(
+                new_cfg,
+                self._data_dir,
+                atomic_write=self._atomic_write,
+            )
+            self._detection_config = new_cfg
             return self._detection_config
 
     def hsv_range(self) -> HSVRange:
@@ -1905,12 +2018,18 @@ class State:
         retired in phase 3; the dashboard goes through unified
         `POST /detection/config` only."""
         with self._lock:
-            self._detection_config = self._detection_config.with_(
+            # Write-then-mutate: see `set_detection_config` for rationale.
+            new_cfg = self._detection_config.with_(
                 hsv=hsv_range,
                 preset=None,
                 last_applied_at=self._time_fn(),
             )
-            self._persist_detection_config_locked()
+            _detection_config_persist(
+                new_cfg,
+                self._data_dir,
+                atomic_write=self._atomic_write,
+            )
+            self._detection_config = new_cfg
             return self._detection_config.hsv
 
     def shape_gate(self) -> ShapeGate:
@@ -1996,8 +2115,15 @@ class State:
 
     def set_pairing_tuning(self, tuning: PairingTuning) -> PairingTuning:
         with self._lock:
+            # Write-then-mutate: persist to disk first, then update
+            # in-memory state. On `_atomic_write` failure the in-memory
+            # `_pairing_tuning` stays consistent with disk.
+            payload = json.dumps(
+                {"gap_threshold_m": tuning.gap_threshold_m},
+                indent=2,
+            )
+            self._atomic_write(self._pairing_tuning_path, payload)
             self._pairing_tuning = tuning
-            self._persist_pairing_tuning_locked()
             return self._pairing_tuning
 
     def live_session_frozen_config(
@@ -2026,12 +2152,18 @@ class State:
 
     def set_shape_gate(self, shape_gate: ShapeGate) -> ShapeGate:
         with self._lock:
-            self._detection_config = self._detection_config.with_(
+            # Write-then-mutate: see `set_detection_config` for rationale.
+            new_cfg = self._detection_config.with_(
                 shape_gate=shape_gate,
                 preset=None,
                 last_applied_at=self._time_fn(),
             )
-            self._persist_detection_config_locked()
+            _detection_config_persist(
+                new_cfg,
+                self._data_dir,
+                atomic_write=self._atomic_write,
+            )
+            self._detection_config = new_cfg
             return self._detection_config.shape_gate
 
     def set_default_paths(self, paths: set[DetectionPath]) -> set[DetectionPath]:
@@ -2378,6 +2510,11 @@ class State:
                 kept = [s for s in self._recently_ended_sessions if s.id != session_id]
                 self._recently_ended_sessions.clear()
                 self._recently_ended_sessions.extend(kept)
+            # Drop a tombstone so a late `record()` (stale iOS retry,
+            # in-flight server_post job that hadn't finished writing)
+            # cannot silently resurrect this session on disk + in memory.
+            if session_id not in self._deleted_session_tombstones:
+                self._deleted_session_tombstones.append(session_id)
             self._persist_session_meta_locked()
 
         # Disk cleanup outside the lock — same pattern record() uses.
