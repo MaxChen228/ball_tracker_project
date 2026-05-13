@@ -116,7 +116,7 @@ camera_id: str                       # echo of the {cam} in the URL (server-side
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
-active_preset_name: str | null       # currently-bound preset filename (DetectionConfig.preset). Pushed alongside the HSV+shape values so iOS can log preset identity. Pure metadata — iOS does not act on it. Null only when the live config is custom (slider direct-POST path); never null after a /presets or /presets/active call.
+active_preset_name: str | null       # currently-bound LIVE preset filename (DetectionConfig.preset). Pushed alongside the HSV+shape values so iOS can log preset identity. Pure metadata — iOS does not act on it. Null only when the live config is custom (slider direct-POST path); never null after a /presets or /presets/active {target:"live"} call. NOTE: the **server_post** active preset is NOT in this WS push (it never affects iOS) and is NOT exposed via any REST JSON endpoint. `active_server_post_preset_name` is injected at SSR time by `viewer_page.py` (calls `state.active_server_post_preset_name()` → reads `data/active_server_post_preset.json`) — there is no `GET /status` field for it.
 chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/chirp_detect_threshold.json
 mutual_sync_threshold: float         # cutoff for the two-device mutual-sync coordinator; data/mutual_sync_threshold.json
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"} (state.heartbeat_interval_s)
@@ -262,7 +262,8 @@ cache's `segments` array, and repaints the latest-pitch fit visuals (curves
 event: fit
 data: {
   "sid": str,
-  "segments": [SegmentRecord, ...]   # may be empty (1-point sessions, pure noise)
+  "segments": [SegmentRecord, ...],  # may be empty (1-point sessions, pure noise)
+  "gap_threshold_m": float            # carried on all three emit paths: recompute (routes/sessions.py:493), server_post (routes/pitch.py:410), and cycle_end (routes/device_ws.py:305). Clients should always patch their per-session slider cache from this field.
 }
 ```
 
