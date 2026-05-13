@@ -344,8 +344,9 @@ BT.601 (iOS) + BT.709 (server) 不對齊是 acceptable。
   `CameraCommandRouter` guard
 - 動 `state.py` 內共用 state → 用 public accessor（如
   `state.live_session_frozen_config(sid)`），不要戳 `state._xxx`
-  （`state.py` 目前 2600+ 行，PR #117/#119 把 `state_events.py` /
-  `session_results.py` / `detection_paths.py` 分出後仍是最大單一模組）
+  （`state.py` 目前 2100+ 行，PR #117/#119 + state-py-split 把 `state_events.py` /
+  `session_results.py` / `detection_paths.py` / `state_detection.py` /
+  `status_view.py` / `ws_messages.py` 分出後仍是最大單一模組）
 
 ### 待辦（PR #93 NIT 清單）
 
