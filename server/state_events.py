@@ -53,7 +53,10 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
     snapshots = _snapshot_sessions_locked(state)
 
     events: list[dict[str, Any]] = []
-    for sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry, result, created_at, is_live_only in snapshots:
+    for (
+        sid, cams_present, n_ball_frames_by_path, cam_capture_telemetry,
+        result, created_at, is_live_only, n_server_post_algorithms,
+    ) in snapshots:
         trashed = state.processing.is_trashed(sid)
         if bucket == "active" and trashed:
             continue
@@ -136,20 +139,13 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                     else None
                 ),
                 # Distinct server_post algorithm runs on this session
-                # (e.g., {v11_hsv_cc, hybrid_28d}). Drives the `+N` badge
-                # on the Svr chip in `render_dashboard_events`. Mirrors
-                # viewer's history dropdown union (which uses
-                # `pitch.frames_by_algorithm` minus the live bucket); on
-                # SessionResult the same set lives in
-                # `frame_counts_by_algorithm`.
-                "n_server_post_algorithms": (
-                    len(
-                        result.frame_counts_by_algorithm.keys()
-                        - {IOS_CAPTURE_TIME_ALGORITHM_ID}
-                    )
-                    if result is not None
-                    else 0
-                ),
+                # (e.g., {v11_hsv_cc, hybrid_28d}). Computed in
+                # `_snapshot_sessions_locked` from `pitch.frames_by_algorithm` —
+                # same source viewer's history dropdown reads — so the
+                # dashboard `+N` badge cannot drift below viewer's count
+                # if `SessionResult.frame_counts_by_algorithm` happens to
+                # drop a zero-frame bucket.
+                "n_server_post_algorithms": n_server_post_algorithms,
             }
         )
 
@@ -183,6 +179,7 @@ def _snapshot_sessions_locked(
         SessionResult | None,
         float | None,
         bool,
+        int,
     ]
 ]:
     """Grab everything we need from in-memory state under one lock acquisition.
@@ -226,6 +223,11 @@ def _snapshot_sessions_locked(
                 path: {} for path, _ in _PATH_TO_FRAMES_ATTR
             }
             created_candidates: list[float] = []
+            # Union of non-live algorithm buckets across both cams' pitches.
+            # Mirrors viewer's history-dropdown union (viewer iterates the
+            # same `pitch.frames_by_algorithm.keys()` across A/B). Drives
+            # the `+N` badge on the dashboard Svr chip.
+            server_alg_ids: set[str] = set()
             for cam in cams_present:
                 pitch = state.pitches[(cam, sid)]
                 for path, attr in _PATH_TO_FRAMES_ATTR:
@@ -237,8 +239,10 @@ def _snapshot_sessions_locked(
                     n_ball_frames_by_path[path][cam] = sum(
                         1 for f in frames if f.ball_detected
                     )
+                server_alg_ids |= set(pitch.frames_by_algorithm.keys())
                 if pitch.created_at is not None:
                     created_candidates.append(pitch.created_at)
+            server_alg_ids.discard(IOS_CAPTURE_TIME_ALGORITHM_ID)
             cam_capture_telemetry = {
                 cam: state.pitches[(cam, sid)].capture_telemetry
                 for cam in cams_present
@@ -279,6 +283,7 @@ def _snapshot_sessions_locked(
                     state.results.get(sid),
                     session_created_at,
                     not is_pitched,
+                    len(server_alg_ids),
                 )
             )
     return snapshots

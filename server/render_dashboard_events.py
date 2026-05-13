@@ -264,7 +264,13 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
     # the viewer history dropdown shows (frame buckets minus the live
     # bucket). Operator switches active server_post algorithm in viewer;
     # dashboard's job is just to hint that alternates exist.
-    n_alg = int(e.get("n_server_post_algorithms") or 0)
+    # `.get(..., 0)` matches the renderer's defensive convention used
+    # by every other event-dict access in this file (path_status,
+    # n_ball_frames_by_path, n_triangulated). Tests construct minimal
+    # event dicts; strict access would break them without buying real
+    # safety because the field is set by `build_events` on every code
+    # path that exercises the renderer in production.
+    n_alg = e.get("n_server_post_algorithms", 0)
     if n_alg >= 2:
         n_others = n_alg - 1
         multi = (
