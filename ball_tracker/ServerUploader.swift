@@ -51,38 +51,7 @@ final class ServerUploader: @unchecked Sendable {
         case invalidResponse
     }
 
-    /// Legacy sugar: upload a payload with no video attachment.
-    func uploadPitch(
-        _ pitch: PitchPayload,
-        completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
-    ) {
-        uploadPitch(pitch, videoURL: nil, completion: completion)
-    }
-
-    /// Upload one cycle as multipart/form-data. `videoURL` is optional — when
-    /// nil (legacy / failed clip writer / Phase-0 payload cache) the request
-    /// still succeeds and the server stores only the JSON side.
-    ///
-    /// Legacy `Error`-typed completion overload. Internally delegates to
-    /// `uploadPitchTyped(_:videoURL:completion:)` and maps `UploadError`
-    /// back to the `NSError` shape the previous implementation surfaced,
-    /// so existing call sites (e.g. `PayloadUploadQueue`) behave identically.
-    func uploadPitch(
-        _ pitch: PitchPayload,
-        videoURL: URL?,
-        completion: ((Result<PitchUploadResponse, Error>) -> Void)? = nil
-    ) {
-        uploadPitchTyped(pitch, videoURL: videoURL) { result in
-            switch result {
-            case .success(let response):
-                completion?(.success(response))
-            case .failure(let uploadError):
-                completion?(.failure(Self.legacyNSError(for: uploadError)))
-            }
-        }
-    }
-
-    /// Typed variant of `uploadPitch(_:videoURL:completion:)`. Distinguishes
+    /// Upload one pitch as multipart/form-data. Distinguishes
     /// network / 4xx / 5xx / decoding failures so the caller can branch its
     /// retry strategy on `UploadError.isTransient`.
     ///
@@ -203,30 +172,6 @@ final class ServerUploader: @unchecked Sendable {
         label: "com.Max0228.ball-tracker.uploader.body",
         qos: .utility
     )
-
-    /// Map a typed `UploadError` back into the `NSError` shape emitted by
-    /// the pre-typed implementation. Kept private so the legacy overload
-    /// can preserve wire-compatible error surfaces for unmigrated callers.
-    private static func legacyNSError(for error: UploadError) -> NSError {
-        switch error {
-        case .network(let urlError):
-            return urlError as NSError
-        case .client(let code, _), .server(let code, _):
-            return NSError(
-                domain: "ServerUploader",
-                code: code,
-                userInfo: [NSLocalizedDescriptionKey: "HTTP status \(code)"]
-            )
-        case .decoding(let underlying):
-            return underlying as NSError
-        case .invalidResponse:
-            return NSError(
-                domain: "ServerUploader",
-                code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Empty response"]
-            )
-        }
-    }
 
     /// Build the multipart/form-data envelope into a tmp file by streaming
     /// (a) the JSON header bytes, (b) — when `videoURL` is non-nil — the
