@@ -309,21 +309,29 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        # Reconnect-race guard: if a newer ws task already replaced our
-        # socket in `device_ws._sockets` (cam reconnected before our
-        # finally fires), the snapshot will show `connected=True` for a
-        # different ws object. Skip the offline broadcasts so we don't
-        # paint the freshly-online cam as offline for one tick — the
-        # newer `connect()` already broadcast `online=True`.
-        # The disconnect() call below is identity-guarded internally
-        # (no-op when current socket is not ours), so it's safe to keep
-        # unconditional.
-        snap = device_ws.snapshot().get(camera_id)
-        replaced_by_newer = snap is not None and snap.connected
+        # Reconnect-race guard. Order matters: call `disconnect()` FIRST,
+        # then snapshot. `DeviceSocketManager.disconnect(cam, ws)` is
+        # identity-guarded — it pops `_sockets[cam]` only when the current
+        # entry IS our `ws`; if a newer connect() already replaced us, the
+        # call is a no-op and `_sockets[cam]` keeps the newer socket.
+        #
+        # Reading snapshot AFTER disconnect therefore tells us cleanly:
+        #   - normal disconnect: our entry popped → connected=False →
+        #     broadcast offline + clear preview ✓
+        #   - reconnect race:    no-op disconnect → newer entry still
+        #     present → connected=True → bail (newer connect() already
+        #     broadcast online=True) ✓
+        #
+        # If we snapshot BEFORE disconnect, our own still-occupying socket
+        # makes `connected=True` unconditionally, so the guard would skip
+        # offline broadcast on every normal disconnect — exactly the bug
+        # this guard was added to prevent.
         device_ws.disconnect(camera_id, websocket)
-        if replaced_by_newer:
-            # Newer ws task owns the cam now; its connect() already
-            # broadcast online=True. Bail before painting offline.
+        snap = device_ws.snapshot().get(camera_id)
+        if snap is not None and snap.connected:
+            # Reconnect race: newer ws already replaced ours, disconnect()
+            # was a no-op. Bail before painting offline — the newer
+            # connect() path already broadcast online=True.
             return
         # Dashboard `/status` derives online-ness from `Device.last_seen_at`
         # with a 3 s stale window, so without this the UI keeps painting the

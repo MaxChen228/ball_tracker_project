@@ -238,12 +238,19 @@ IOS_CAPTURE_TIME_ALGORITHM_ID = "ios_capture_time"
 # `DetectionConfigSnapshotPayload` persistence. At the time those
 # frames were produced `v11_hsv_cc` was the only server-side detector
 # that had shipped, so the historical `frames_server_post` content
-# always came from v11. `migrate_disk_pitches.py` and
-# `algorithm_id_for_path` use this constant to anchor the
-# `active_server_post_algorithm_id` pointer when no explicit snapshot
-# stamp exists. Named distinctly from `DEFAULT_ALGORITHM_ID` so a
-# future reader can't mistake "filed under v11" for "explicitly
-# stamped v11" if it ever matters at a call site.
+# always came from v11.
+#
+# This const survives only for (a) one-shot disk-migration anchors
+# (when `migrate_disk_pitches.py`-style scripts existed) and (b) the
+# `algorithms.__init__._check_legacy_bucket_in_registry` drift guard
+# (pins this id equal to a real registered algorithm at boot).
+#
+# The in-band `algorithm_id_for_path` fallback was removed in the
+# silent-fallback audit batch — at runtime a missing
+# `active_server_post_algorithm_id` pointer now raises `ValueError`
+# instead of quietly substituting this constant. Named distinctly
+# from `DEFAULT_ALGORITHM_ID` so a future reader can't mistake
+# "filed under v11" for "explicitly stamped v11".
 _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"
 
 
