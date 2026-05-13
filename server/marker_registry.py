@@ -24,53 +24,29 @@ class MarkerRegistryDB:
     def __init__(self, data_dir: Path) -> None:
         self._lock = Lock()
         self._path = Path(data_dir) / "markers.json"
-        self._legacy_path = Path(data_dir) / "extended_markers.json"
         self._markers: dict[int, MarkerRecord] = {}
         self._load()
 
     def _load(self) -> None:
-        raw_obj: dict | None = None
-        if self._path.exists():
-            try:
-                raw_obj = json.loads(self._path.read_text())
-            except Exception:
-                logger.exception(
-                    "MarkerRegistryDB: failed to parse %s — starting empty",
-                    self._path,
-                )
-                raw_obj = None
-        elif self._legacy_path.exists():
-            try:
-                raw_obj = json.loads(self._legacy_path.read_text())
-            except Exception:
-                logger.exception(
-                    "MarkerRegistryDB: failed to parse legacy %s — starting empty",
-                    self._legacy_path,
-                )
-                raw_obj = None
-        if raw_obj is None:
+        """Strict loader: corrupt markers.json raises. No legacy migration
+        (extended_markers.json module + disk-shape back-compat removed per
+        CLAUDE.md no-backcompat). Operator deletes/restores file by hand
+        if recovery isn't possible."""
+        if not self._path.exists():
             return
-        for row in raw_obj.get("markers", []):
-            try:
-                if "marker_id" in row or "x_m" in row:
-                    rec = MarkerRecord.model_validate(row)
-                else:
-                    # Back-compat with old `{id, wx, wy}` shape.
-                    rec = MarkerRecord(
-                        marker_id=int(row["id"]),
-                        x_m=float(row["wx"]),
-                        y_m=float(row["wy"]),
-                        z_m=0.0,
-                        on_plate_plane=True,
-                        source_camera_ids=[],
-                    )
-            except Exception:
-                logger.warning(
-                    "MarkerRegistry: skipped malformed row in %s: %r",
-                    self._path,
-                    row,
-                )
-                continue
+        try:
+            raw_obj = json.loads(self._path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{self._path} is not valid JSON: {e}") from e
+        if not isinstance(raw_obj, dict):
+            raise ValueError(f"{self._path} must be a JSON object")
+        rows = raw_obj.get("markers")
+        if rows is None:
+            return
+        if not isinstance(rows, list):
+            raise ValueError(f"{self._path} 'markers' must be an array")
+        for row in rows:
+            rec = MarkerRecord.model_validate(row)
             self._markers[rec.marker_id] = rec
 
     def _atomic_write_locked(self) -> None:
