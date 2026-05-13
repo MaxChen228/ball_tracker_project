@@ -214,11 +214,10 @@ IOS_CAPTURE_TIME_ALGORITHM_ID = "ios_capture_time"
 # `DetectionConfigSnapshotPayload` persistence. At the time those
 # frames were produced `v11_hsv_cc` was the only server-side detector
 # that had shipped, so the historical `frames_server_post` content
-# always came from v11. `migrate_disk_pitches.py` and
-# `algorithm_id_for_path` use this constant to anchor the
-# `active_server_post_algorithm_id` pointer when no explicit snapshot
-# stamp exists. Named distinctly from `DEFAULT_ALGORITHM_ID` so a
-# future reader can't mistake "filed under v11" for "explicitly
+# always came from v11. `algorithm_id_for_path` uses this constant to
+# anchor the `active_server_post_algorithm_id` pointer when no explicit
+# snapshot stamp exists. Named distinctly from `DEFAULT_ALGORITHM_ID`
+# so a future reader can't mistake "filed under v11" for "explicitly
 # stamped v11" if it ever matters at a call site.
 _LEGACY_PRE_SNAPSHOT_ALGORITHM_ID = "v11_hsv_cc"
 
@@ -249,8 +248,7 @@ def persist_pitch_json(pitch: "PitchPayload") -> str:
     flat surfaces — clients (viewer JS / dashboard) still see
     `frames_live` / `frames_server_post` / `*_config_used` projected
     from the dicts. On-disk shape drops them so the disk truly has a
-    single source of truth and `migrate_disk_pitches.py` can stay a
-    one-shot tool rather than a permanent shim."""
+    single source of truth."""
     return pitch.model_dump_json(exclude=_PITCH_PERSIST_EXCLUDE)
 
 
@@ -382,9 +380,6 @@ class PitchPayload(BaseModel):
         `frames_by_algorithm[active_server_post_algorithm_id]`. Returns
         `[]` when no pointer is set (server_post never ran for this
         pitch) — no silent fallback to a legacy bucket per CLAUDE.md.
-        `migrate_disk_pitches.py` eagerly stamps the pointer whenever
-        legacy input declared server_post frames, so the absent-pointer
-        + non-empty-bucket case is unreachable for on-disk records.
 
         Read-only — write via `detection_paths.stamp_server_post_run`."""
         bucket = self.active_server_post_algorithm_id
