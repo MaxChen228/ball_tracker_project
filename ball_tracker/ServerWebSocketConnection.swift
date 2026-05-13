@@ -361,9 +361,14 @@ final class ServerWebSocketConnection {
     }
 
     private func resolvedURL() -> URL {
-        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+        guard var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            preconditionFailure("ServerWebSocketConnection: baseURL is not parseable as URLComponents — \(baseURL)")
+        }
         comps.path = "/ws/device/\(cameraId)"
-        return comps.url ?? baseURL
+        guard let url = comps.url else {
+            preconditionFailure("ServerWebSocketConnection: failed to compose ws URL from baseURL=\(baseURL) cameraId=\(cameraId)")
+        }
+        return url
     }
 
 }

@@ -345,13 +345,6 @@ final class ServerUploader: @unchecked Sendable {
         task.resume()
     }
 
-    /// Convenience: does this failure warrant a retry with backoff?
-    /// `true` for network glitches and 5xx; `false` for 4xx, decoding,
-    /// and the defensive `invalidResponse` case.
-    static func isTransient(_ error: UploadError) -> Bool {
-        return error.isTransient
-    }
-
     /// Generic "POST raw bytes as Content-Type: image/jpeg" used by
     /// `PreviewUploader` (Phase 4a). Not tied to a specific endpoint —
     /// the caller provides the path so this can grow to support other
