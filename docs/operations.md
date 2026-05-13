@@ -39,7 +39,7 @@ Detection presets live as JSON files under `server/data/presets/<slug>.json` (th
 
 Operator workflow lives entirely on the dashboard's **DETECTION CONFIG** card:
 
-- **Switch presets** — click `Manage…` to open the library list, then click `Use` on the target preset (POSTs to `POST /presets/active`). The identity tag updates to the chosen preset.
+- **Switch presets** — click `Manage…` to open the library list, then click `Use` on the target preset (POSTs to `POST /presets/active` with body `{"name": "<slug>", "target": "live" | "server_post"}`; 400 on missing field, 422 on wrong target or v11 mismatch for live). The identity tag updates to the chosen preset.
 - **Edit & save** — drag sliders to taste, click `Apply`. Apply opens an **algorithm + preset picker** (d963e4a): pick the target algorithm (form pulls schema from `GET /algorithms`, params editor regenerates on switch), name the slug + label, then POSTs `{name, label, algorithm_id, params}` to `POST /presets`. For a `v11_hsv_cc` preset that becomes the new live target, the server writes the preset file and atomically switches the live config + WS broadcast; non-v11 presets save to disk only (no live change, no WS push — they're server_post-only). The slug doubles as the filename; saving under an existing slug returns 409.
 - **Manage** — click `Manage…` to open the library list; per row you get `Use` (snap live config to that preset via `POST /presets/active`), `Duplicate` (prompt for a new slug+label, copy the values), `Delete` (unlink the file — 409 if the slug is currently active). The currently-bound preset is marked `★ current`.
 
