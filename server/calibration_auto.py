@@ -261,10 +261,7 @@ def _solve_pnp_homography(
     )
     if not ok:
         return None
-    try:
-        rvec, tvec = cv2.solvePnPRefineLM(object_pts, image_pts, K, dist, rvec, tvec)
-    except Exception:
-        pass
+    rvec, tvec = cv2.solvePnPRefineLM(object_pts, image_pts, K, dist, rvec, tvec)
     R_wc, _ = cv2.Rodrigues(rvec)
     H = K @ np.column_stack([R_wc[:, 0], R_wc[:, 1], tvec.reshape(3)])
     if abs(H[2, 2]) < 1e-12:

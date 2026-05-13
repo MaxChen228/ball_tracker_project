@@ -341,7 +341,6 @@ class SessionProcessingState:
             return self._summary_chip(
                 pending_keys=pending_keys,
                 completed=completed,
-                has_candidates=bool(candidates),
             )
 
     def _summary_chip(
@@ -349,7 +348,6 @@ class SessionProcessingState:
         *,
         pending_keys: set[JobKey],
         completed: bool,
-        has_candidates: bool,
     ) -> tuple[str | None, bool]:
         """Processing chip state for a single session.
 
@@ -382,6 +380,7 @@ class SessionProcessingState:
         self.server_post_jobs.clear()
         self.server_post_active_tasks.clear()
         self.server_post_errors.clear()
+        self.server_post_progress.clear()
 
     def remove_session(self, session_id: str) -> None:
         self.trashed_sessions.pop(session_id, None)
