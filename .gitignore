@@ -57,6 +57,8 @@ server/data/videos/
 server/data/results/
 server/data/calibrations/
 server/data/intrinsics/
+server/data/gt/
+server/data/sync_audio/
 server/data/*.json
 /data/
 
