@@ -118,6 +118,32 @@ def _new_session_id() -> str:
     return "s_" + secrets.token_hex(4)
 
 
+def _summarise_load_error(e: Exception) -> str:
+    """Compact one-line summary of a pitch-file load failure for
+    `_load_from_disk`. Pydantic's `ValidationError.__str__` emits four
+    lines per offending field (path / message / docs URL / blank), so a
+    single legacy file with N missing fields drowns out the next file's
+    error and the post-loop "N file(s) failed" summary. We collapse to
+    "<count> validation error(s); first fields: a.b.c, d.e.f, …" — the
+    operator can re-run `PitchPayload.model_validate(json.loads(...))`
+    on any flagged path to recover full detail."""
+    errors = getattr(e, "errors", None)
+    if callable(errors):
+        try:
+            entries = errors()
+        except Exception:
+            entries = None
+        if entries:
+            fields = ", ".join(
+                ".".join(str(part) for part in entry.get("loc", ()))
+                for entry in entries[:3]
+            )
+            more = "" if len(entries) <= 3 else f" (+{len(entries) - 3} more)"
+            return f"{len(entries)} validation error(s); first fields: {fields}{more}"
+    # Non-pydantic exception (JSONDecodeError, OSError) — first line only.
+    return str(e).splitlines()[0] if str(e) else type(e).__name__
+
+
 class State:
     """Server-wide in-memory state, protected by a single `_lock` (see
     invariant below).
@@ -506,8 +532,16 @@ class State:
                 obj = json.loads(path.read_text())
                 pitch = PitchPayload.model_validate(obj)
             except Exception as e:
-                logger.error("skip corrupt pitch file %s: %s", path.name, e)
-                load_failures.append((path.name, str(e)[:200]))
+                # pydantic ValidationError.__str__ dumps every offending
+                # field across multiple lines, burying the final
+                # "N file(s) failed" summary and every other startup
+                # INFO line under hundreds of lines per legacy file.
+                # Compress to count + first three field paths; full
+                # detail is reproducible by re-running model_validate
+                # manually on the offending file.
+                summary = _summarise_load_error(e)
+                logger.error("skip corrupt pitch file %s: %s", path.name, summary)
+                load_failures.append((path.name, summary[:200]))
                 continue
             # Backfill `created_at` for legacy pitches written before the
             # field shipped: prefer the file's mtime (real upload moment) so
