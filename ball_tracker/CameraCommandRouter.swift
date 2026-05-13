@@ -132,7 +132,7 @@ final class CameraCommandRouter {
             DispatchQueue.main.async { self.deps.healthMonitor.probeNow() }
         case "settings":
             let camId = message["camera_id"] as? String ?? "unknown"
-            // server lockstep: main.py:510 unconditionally writes device_time_synced (default false). Missing key = schema drift, drop the whole settings update.
+            // server lockstep: main.py::_settings_message_for unconditionally writes device_time_synced (default false). Missing key = schema drift, drop the whole settings update.
             guard let pushedTimeSync = message["device_time_synced"] as? Bool else {
                 commandLog.error("ws settings missing device_time_synced cam=\(camId, privacy: .public)")
                 return
@@ -146,7 +146,7 @@ final class CameraCommandRouter {
             // top of the handler so missing server-required scaffolding
             // fields (device_time_synced + preview_requested +
             // calibration_frame_requested — all three written
-            // unconditionally by main.py:510 alongside hsv_range and
+            // unconditionally by main.py::_settings_message_for alongside hsv_range and
             // shape_gate which are gated below) atomic-drop the whole
             // settings update — never apply paths/exposure/hsv half-way
             // before bailing out. Detection-critical hsv_range and

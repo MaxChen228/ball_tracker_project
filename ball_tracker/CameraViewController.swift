@@ -85,7 +85,31 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// off WS arm/settings traffic; tagged onto every recording that starts
     /// while the session is armed. Nil when the server has no active
     /// session. iPhones never mint this themselves.
-    private var currentSessionId: String?
+    ///
+    /// Lock-guarded so main-queue writes (WS CommandRouter) can't race with
+    /// detection-queue reads (`LiveFrameDispatcher.dispatchFrame` per frame).
+    /// Mirror of `AtomicUploaderBox` rationale — plain stored prop is not
+    /// safe across queues. Read/write through the snapshot/set helpers below.
+    private let sessionStateLock = NSLock()
+    private var _currentSessionId: String?
+    private var _currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
+
+    private func snapshotSessionId() -> String? {
+        sessionStateLock.lock(); defer { sessionStateLock.unlock() }
+        return _currentSessionId
+    }
+    private func snapshotSessionPaths() -> Set<ServerUploader.DetectionPath> {
+        sessionStateLock.lock(); defer { sessionStateLock.unlock() }
+        return _currentSessionPaths
+    }
+    private func setSessionId(_ v: String?) {
+        sessionStateLock.lock(); defer { sessionStateLock.unlock() }
+        _currentSessionId = v
+    }
+    private func setSessionPaths(_ v: Set<ServerUploader.DetectionPath>) {
+        sessionStateLock.lock(); defer { sessionStateLock.unlock() }
+        _currentSessionPaths = v
+    }
 
     private let captureTelemetryLock = NSLock()
     private var appliedCaptureWidthPx: Int = 1920
@@ -109,7 +133,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
     // UI containers. Preview stays full-screen; a small overlay panel exposes
     // role, link, and preview status.
-    private var currentSessionPaths: Set<ServerUploader.DetectionPath> = [.serverPost]
+    // `currentSessionPaths` moved up next to `currentSessionId` and is now
+    // lock-guarded via `_currentSessionPaths` + snapshot/set helpers.
     // Nil until the dashboard pushes the active preset; see
     // ConcurrentDetectionPool for the matching refuse-until-pushed gate
     // that prevents detection from running with a hardcoded boot preset.
@@ -159,7 +184,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             processingQueue: processingQueue,
             dependencies: .init(
                 getCameraRole: { [weak self] in self?.settings.cameraRole ?? "?" },
-                getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
+                getCurrentSessionPaths: { [weak self] in self?.snapshotSessionPaths() ?? [] },
                 getSyncId: { [weak self] in self?.syncCoordinator.lastSyncId },
                 getSyncAnchorTimestampS: { [weak self] in self?.syncCoordinator.lastSyncAnchorTimestampS },
                 currentCaptureTelemetry: { [weak self] fps in
@@ -314,7 +339,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         // mechanism, and any drops show up loudly on `droppedFrameCount`
         // instead of being baked into the design.
         recordingWorkflow.enterRecordingMode(
-            sessionId: currentSessionId,
+            sessionId: snapshotSessionId(),
             serverTimeSyncConfirmed: serverTimeSyncConfirmed
         )
         armHaptic.impactOccurred()
@@ -332,7 +357,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     /// the sync-mode enter/exit boundaries.
     func exitRecordingToStandby() {
         recordingWorkflow.exitRecordingToStandby(
-            currentSessionId: currentSessionId,
+            currentSessionId: snapshotSessionId(),
             currentState: state
         )
     }
@@ -476,7 +501,13 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 getState: { [weak self] in self?.state ?? .standby },
                 getCameraRole: { [weak self] in self?.settings.cameraRole ?? "?" },
                 standbyFps: standbyFps,
-                uploader: { [weak self] in self!.uploader },
+                uploader: { [weak self] in
+                    // Sync coordinator should never call uploader() after VC release.
+                    // If you hit this trap: caller forgot to invalidate the coordinator
+                    // in viewWillDisappear before backgrounding the retry chain.
+                    precondition(self != nil, "uploader() called after CameraViewController release")
+                    return self!.uploader
+                },
                 healthMonitor: { [weak self] in self?.healthMonitor },
                 chirpDetector: { [weak self] in self?.captureRuntime.chirpDetector },
                 setupAudioCapture: { [weak self] in
@@ -508,10 +539,10 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             cameraRole: settings.cameraRole,
             dependencies: .init(
                 getState: { [weak self] in self?.state ?? .standby },
-                getCurrentSessionId: { [weak self] in self?.currentSessionId },
-                getCurrentSessionPaths: { [weak self] in self?.currentSessionPaths ?? [] },
-                setCurrentSessionId: { [weak self] in self?.currentSessionId = $0 },
-                setCurrentSessionPaths: { [weak self] in self?.currentSessionPaths = $0 },
+                getCurrentSessionId: { [weak self] in self?.snapshotSessionId() },
+                getCurrentSessionPaths: { [weak self] in self?.snapshotSessionPaths() ?? [] },
+                setCurrentSessionId: { [weak self] in self?.setSessionId($0) },
+                setCurrentSessionPaths: { [weak self] in self?.setSessionPaths($0) },
                 getCurrentTargetFps: { [weak self] in self?.currentTargetFps() ?? 60 },
                 getCurrentCaptureHeight: { [weak self] in self?.captureRuntime.currentCaptureHeight },
                 getSyncId: { [weak self] in self?.syncCoordinator.lastSyncId },
@@ -652,7 +683,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
 
 
     private func applyRemoteArm() {
-        log.info("camera received arm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        log.info("camera received arm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.snapshotSessionId() ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
             enterRecordingMode()
@@ -667,7 +698,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     }
 
     private func applyRemoteDisarm() {
-        log.info("camera received disarm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.currentSessionId ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
+        log.info("camera received disarm command state=\(Self.stateText(self.state), privacy: .public) session=\(self.snapshotSessionId() ?? "nil", privacy: .public) cam=\(self.settings.cameraRole, privacy: .public)")
         switch state {
         case .standby:
             break
@@ -677,7 +708,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             syncCoordinator.abortMutualSync(reason: "disarmed")
         case .recording:
             recordingWorkflow.handleRemoteDisarm(
-                currentSessionId: currentSessionId,
+                currentSessionId: snapshotSessionId(),
                 currentState: state
             )
         }

@@ -27,10 +27,17 @@ import Foundation
 /// they're invisible.
 final class ConcurrentDetectionPool {
 
-    /// Public counter — frames dropped at `enqueue` because the in-flight
-    /// queue was full. Visible from the dashboard / HUD so the operator
-    /// can see when detection is falling behind.
-    private(set) var droppedFrameCount: Int = 0
+    /// Split counters for the two distinct drop reasons. `droppedFrameCount`
+    /// stays for backwards-compatible HUD readers but is now the sum of
+    /// the two underlying counters. The split lets the operator distinguish
+    /// "WS settings haven't landed yet" (transient, expected during the
+    /// arm → first-push race) from "detection can't keep up" (a real
+    /// throughput problem that warrants attention).
+    private(set) var droppedFrameCountBacklog: Int = 0
+    private(set) var droppedFrameCountAwaitingSettings: Int = 0
+    var droppedFrameCount: Int {
+        droppedFrameCountBacklog + droppedFrameCountAwaitingSettings
+    }
 
     /// Frames currently queued or in-flight on `detectionQueue`. Surfaced
     /// for the "still draining" UI status during disarm → standby.
@@ -78,12 +85,12 @@ final class ConcurrentDetectionPool {
         // (e.g. blue_ball session running with tennis thresholds during
         // the WS-push race window).
         guard let hsvSnapshot = hsvRange, let shapeSnapshot = shapeGate else {
-            droppedFrameCount += 1
+            droppedFrameCountAwaitingSettings += 1
             stateLock.unlock()
             return false
         }
         if inFlightCount >= maxBacklog {
-            droppedFrameCount += 1
+            droppedFrameCountBacklog += 1
             stateLock.unlock()
             return false
         }
@@ -193,7 +200,8 @@ final class ConcurrentDetectionPool {
 
     func reset() {
         stateLock.lock()
-        droppedFrameCount = 0
+        droppedFrameCountBacklog = 0
+        droppedFrameCountAwaitingSettings = 0
         stateLock.unlock()
     }
 
