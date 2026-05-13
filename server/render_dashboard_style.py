@@ -663,6 +663,14 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                          opacity: 0.7; }}
 .ev-cfg-chip.deleted b {{ color: var(--failed); }}
 .ev-cfg-chip i {{ font-style: italic; opacity: 0.7; margin-left: 4px; }}
+/* +N badge — surfaces multi-algorithm history existence next to the
+   Svr chip. Same mono/border styling as the chips so it reads as a
+   chip-strip extension, not a status pill. Hidden when 0 or 1 runs. */
+.ev-cfg-multi {{ font-family: var(--mono); font-size: 10px; line-height: 1;
+                  padding: 3px 6px; border: 1px solid var(--border-base);
+                  border-radius: var(--r); color: var(--sub);
+                  letter-spacing: 0.04em; opacity: 0.7; font-weight: 600;
+                  font-variant-numeric: tabular-nums; }}
 /* Inline preset selector wedged into the Run-srv form — narrow, mono,
    matches the pipe-chip aesthetic so it doesn't visually overpower the
    adjacent button. */

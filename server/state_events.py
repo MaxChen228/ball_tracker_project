@@ -16,7 +16,12 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from typing import TYPE_CHECKING, Any
 
-from schemas import CaptureTelemetryPayload, DetectionPath, SessionResult
+from schemas import (
+    IOS_CAPTURE_TIME_ALGORITHM_ID,
+    CaptureTelemetryPayload,
+    DetectionPath,
+    SessionResult,
+)
 
 # Asia/Taipei. Hard-coded because the only operator runs out of TW and a
 # zoneinfo dependency for one fixed offset is overkill. Adjust if the rig
@@ -129,6 +134,21 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                     result.server_post_config_used.model_dump(mode="json")
                     if result is not None and result.server_post_config_used is not None
                     else None
+                ),
+                # Distinct server_post algorithm runs on this session
+                # (e.g., {v11_hsv_cc, hybrid_28d}). Drives the `+N` badge
+                # on the Svr chip in `render_dashboard_events`. Mirrors
+                # viewer's history dropdown union (which uses
+                # `pitch.frames_by_algorithm` minus the live bucket); on
+                # SessionResult the same set lives in
+                # `frame_counts_by_algorithm`.
+                "n_server_post_algorithms": (
+                    len(
+                        result.frame_counts_by_algorithm.keys()
+                        - {IOS_CAPTURE_TIME_ALGORITHM_ID}
+                    )
+                    if result is not None
+                    else 0
                 ),
             }
         )

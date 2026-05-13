@@ -260,10 +260,27 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
             f'{html.escape(label)} <b>{prefix}{html.escape(name)}</b></span>'
         )
 
+    # +N badge surfaces multi-algorithm history existence — same union
+    # the viewer history dropdown shows (frame buckets minus the live
+    # bucket). Operator switches active server_post algorithm in viewer;
+    # dashboard's job is just to hint that alternates exist.
+    n_alg = int(e.get("n_server_post_algorithms") or 0)
+    if n_alg >= 2:
+        n_others = n_alg - 1
+        multi = (
+            f'<span class="ev-cfg-multi" title="'
+            f'{n_others} other algorithm run'
+            f'{"s" if n_others != 1 else ""} on this session '
+            f'— open viewer to switch active">+{n_others}</span>'
+        )
+    else:
+        multi = ""
+
     return (
         f'<div class="ev-cfg-strip">'
         f'{_chip("Live", live_cfg, show_algorithm_prefix=False)}'
-        f'{_chip("Svr", srv_cfg, show_algorithm_prefix=True)}</div>'
+        f'{_chip("Svr", srv_cfg, show_algorithm_prefix=True)}'
+        f'{multi}</div>'
     )
 
 
