@@ -64,17 +64,6 @@ class FrameCands:
     cands: list[Cand]
 
 
-def extract_candidates(video_path: Path, anchor: float) -> list[FrameCands]:
-    """Decode MOV, run HSV+CC+shape gate, return per-frame candidate
-    list with full shape stats. anchor = sync_anchor_timestamp_s."""
-    out: list[FrameCands] = []
-    for absolute_pts_s, bgr in iter_frames(video_path, 0.0):
-        # iter_frames adds video_start_pts_s — but I passed 0 to keep raw container time.
-        # Need actual: t_rel = container_t + video_start - anchor. video_start tracked outside.
-        out.append((absolute_pts_s, bgr))
-    return out  # raw deferred — wrong, fix below
-
-
 def extract_per_cam(video_path: Path, video_start_pts_s: float, anchor: float) -> list[FrameCands]:
     out: list[FrameCands] = []
     hsv_lo = np.asarray(HSV_LO, dtype=np.uint8)
