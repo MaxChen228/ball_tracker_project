@@ -36,7 +36,7 @@ rule.
 
 ## Preset library
 
-Detection presets live as JSON files under `server/data/presets/<slug>.json` (the directory is gitignored alongside the rest of `server/data/`). Three built-in seeds are written by the server on first boot if their files don't exist: `tennis.json` (algorithm `v11_hsv_cc`), `blue_ball.json` (algorithm `v11_hsv_cc`), and `hybrid_28d_blue_ball.json` (algorithm `hybrid_28d`). Restoring a built-in after edit/delete is `rm server/data/presets/<slug>.json` + restart.
+Detection presets live as JSON files under `server/data/presets/<slug>.json` (the directory is gitignored alongside the rest of `server/data/`). Two built-in seeds are written by the server on first boot if their files don't exist: `tennis.json` and `blue_ball.json`, both algorithm `v11_hsv_cc`. Restoring a built-in after edit/delete is `rm server/data/presets/<slug>.json` + restart.
 
 Operator workflow lives entirely on the dashboard's **DETECTION CONFIG** card:
 

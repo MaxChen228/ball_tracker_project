@@ -10,15 +10,13 @@ write time). `params` is the algorithm's `Detector.params_schema`
 shape — round-trip-validated on POST so a malformed body fails fast
 with the schema's own error.
 
-Built-in tennis / blue_ball / hybrid_28d_blue_ball seeds are written
-on first boot by `presets.seed_builtins`; deleting a built-in and
-restarting recreates it.
+Built-in tennis / blue_ball seeds are written on first boot by
+`presets.seed_builtins`; deleting a built-in and restarting
+recreates it.
 
-Active-config side effect (current state, pre-phase-3):
+Active-config side effect:
 - v11_hsv_cc preset POST / activate → updates live `DetectionConfig`
   and broadcasts WS settings to online cameras.
-- non-v11 preset POST → save to disk only; live config unchanged.
-- non-v11 activate → 422 (dual active live/server_post is phase 3).
 
 Identity validation on `POST /detection/config` (the live-config setter
 in `routes/settings.py`) compares the submitted pair against the
@@ -144,9 +142,9 @@ def _read_preset_body(body: object, *, name_from_url: str | None) -> Preset:
         name=name,
         label=label,
         algorithm_id=algorithm_id,
-        # Round-tripped dict — both V11Params and Hybrid28dParams use
-        # extra='forbid', so unknown fields raise at validation above
-        # rather than being silently dropped here; defaults are filled.
+        # Round-tripped dict — V11Params uses extra='forbid', so
+        # unknown fields raise at validation above rather than being
+        # silently dropped here; defaults are filled.
         # Storing model_dump() instead of the raw body ensures disk
         # files always conform to the schema's serialised shape.
         params=typed.model_dump(),
@@ -326,9 +324,9 @@ def presets_delete(name: str) -> dict[str, Any]:
     """Unlink a preset file. Returns 404 if the preset doesn't exist;
     409 if the preset is currently bound to either active slot — live
     or server_post (operator must switch the relevant slot first via
-    `POST /presets/active`). Built-in seeds (tennis, blue_ball,
-    hybrid_28d_blue_ball) are deletable — restart will re-seed any
-    built-in whose file is missing.
+    `POST /presets/active`). Built-in seeds (tennis, blue_ball) are
+    deletable — restart will re-seed any built-in whose file is
+    missing.
 
     Sessions whose `live_config_used.preset_name` /
     `server_post_config_used.preset_name` references the deleted preset

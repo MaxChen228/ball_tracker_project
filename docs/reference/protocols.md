@@ -28,7 +28,7 @@
   local_recording_index: int?                     # device-local debug counter; server ignores
   config_used_by_algorithm: dict[str, DetectionConfigSnapshotPayload]
     # key   = algorithm_id (str): "ios_capture_time" for live,
-    #         runnable detector ids ("v11_hsv_cc", "hybrid_28d", …) for server_post
+    #         runnable detector ids ("v11_hsv_cc", …) for server_post
     # value = {
     #   algorithm_id: str,
     #   params: dict,            # opaque, algorithm-defined; v11_hsv_cc encodes

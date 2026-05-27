@@ -44,10 +44,9 @@ dashboard `Manage…`.
 ### Preset library mechanics
 
 - Disk-backed: `data/presets/<slug>.json`, one file per preset.
-- `server/presets.py` holds `_BUILTIN_SEEDS` (`tennis`, `blue_ball`,
-  `hybrid_28d_blue_ball`). Boot writes them only if the file does not
-  exist. Existing files are **never overwritten**. Restore canonical
-  seed → `rm` + restart.
+- `server/presets.py` holds `_BUILTIN_SEEDS` (`tennis`, `blue_ball`).
+  Boot writes them only if the file does not exist. Existing files
+  are **never overwritten**. Restore canonical seed → `rm` + restart.
 - Each preset binds to exactly one `algorithm_id`
   ([algorithms.md](algorithms.md)) — not interchangeable across
   algorithms.

@@ -176,8 +176,7 @@ class DetectionConfigSnapshotPayload(BaseModel):
     path's frames. The snapshot identifies the algorithm and carries an
     opaque `params` dict whose shape is owned by that algorithm's
     `Detector.params_schema` — v11_hsv_cc puts `{hsv, shape_gate}`
-    here, future detectors put whatever they need (e.g. hybrid_28d
-    will carry two HSV cubes + temporal hyperparams).
+    here; future detectors put whatever their schema requires.
 
     `preset_name` matches `DetectionConfig.preset` semantics: None =
     custom, non-None = identity claim that may be surfaced as

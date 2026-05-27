@@ -241,11 +241,10 @@
       // Server response and POST body are both canonical
       // `{algorithm_id, name, label, params}`. Duplicate ships the
       // source's `algorithm_id` + `params` verbatim under the new name
-      // — works for any registered algorithm (v11_hsv_cc and
-      // hybrid_28d today). The "Apply" path on the dashboard is still
-      // v11-only because the slider widgets are; that constraint will
-      // lift in phase 4 when the form generator dispatches on
-      // `GET /algorithms`.
+      // — works for any registered algorithm (v11_hsv_cc today). The
+      // "Apply" path on the dashboard is v11-only because the slider
+      // widgets are; when a non-v11 algorithm grows its own dashboard
+      // surface, the form generator will dispatch on `GET /algorithms`.
       const r = await fetch('/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

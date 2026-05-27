@@ -139,7 +139,7 @@ def build_events(state: "State", *, bucket: str = "active") -> list[dict[str, An
                     else None
                 ),
                 # Distinct server_post algorithm runs on this session
-                # (e.g., {v11_hsv_cc, hybrid_28d}). Computed in
+                # (e.g., {v11_hsv_cc}). Computed in
                 # `_snapshot_sessions_locked` from `pitch.frames_by_algorithm` —
                 # same source viewer's history dropdown reads — so the
                 # dashboard `+N` badge cannot drift below viewer's count

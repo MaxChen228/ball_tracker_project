@@ -306,17 +306,16 @@ class State:
             data_dir,
             atomic_write=self._atomic_write,
         )
-        # Phase-3 dual active preset: `_detection_config.preset` drives
-        # the live (iOS) path and is v11_hsv_cc-only because iOS does
-        # the detection itself. `_active_server_post_preset_name` drives
-        # the server-side post-pass and accepts any registered algorithm
-        # (v11 or hybrid). Boot default = same as live preset (operator
-        # can re-bind to a hybrid preset via dashboard); persisted so a
-        # restart doesn't silently drop the operator's last server_post
-        # choice. Read by the dashboard render path + the `Run server`
-        # event button; orthogonal to live config and WS settings push
-        # (iOS never sees the server_post selection — it only ever runs
-        # the live algorithm).
+        # Dual active preset: `_detection_config.preset` drives the
+        # live (iOS) path and is v11_hsv_cc-only because iOS does the
+        # detection itself. `_active_server_post_preset_name` drives
+        # the server-side post-pass and accepts any registered
+        # algorithm. Boot default = same as live preset; persisted so
+        # a restart doesn't silently drop the operator's last
+        # server_post choice. Read by the dashboard render path + the
+        # `Run server` event button; orthogonal to live config and WS
+        # settings push (iOS never sees the server_post selection — it
+        # only ever runs the live algorithm).
         self._active_server_post_preset_name: str = (
             self._load_active_server_post_preset_or_default()
         )

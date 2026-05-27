@@ -197,8 +197,9 @@ def detection_config_strip_html(
         # prefix is redundant noise on every render.
         f'{_config_pill_html("LIVE", live_config_used, presets_by_name, show_algorithm_prefix=False)}'
         # SVR pill keeps the prefix — server_post can run any registered
-        # algorithm (v11_hsv_cc / hybrid_28d / future detectors). The
-        # algorithm choice is the variable axis on the SVR side.
+        # algorithm (v11_hsv_cc today; future detectors register through
+        # the algorithm registry). The algorithm choice is the variable
+        # axis on the SVR side.
         f'{_config_pill_html("SVR", server_post_config_used, presets_by_name, show_algorithm_prefix=True)}'
         '</div>'
     )
@@ -221,18 +222,6 @@ def format_snapshot_params(algorithm_id: str, params: dict) -> str:
             f"S {h['s_min']}-{h['s_max']} · "
             f"V {h['v_min']}-{h['v_max']} · "
             f"asp≥{g['aspect_min']:.2f} fill≥{g['fill_min']:.2f}"
-        )
-    if algorithm_id == "hybrid_28d":
-        ph = params["prod_hsv"]
-        pg = params["prod_shape"]
-        vh = params["v11_hsv"]
-        vg = params["v11_shape"]
-        neigh = params["neigh_half"]
-        match_px = params["match_px"]
-        return (
-            f"PROD H {ph['h_min']}-{ph['h_max']} asp≥{pg['aspect_min']:.2f} · "
-            f"V11 H {vh['h_min']}-{vh['h_max']} asp≥{vg['aspect_min']:.2f} · "
-            f"neigh±{neigh} match{match_px:.1f}px"
         )
     return f"alg:{algorithm_id}"
 

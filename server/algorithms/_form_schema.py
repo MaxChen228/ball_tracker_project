@@ -38,7 +38,7 @@ class FormField:
     """One leaf field in a flattened params schema.
 
     `path` is the dotted access path from the params root — e.g.
-    `prod_hsv.h_min` for `Hybrid28dParams.prod_hsv.h_min`. `type` is
+    `hsv.h_min` for `V11Params.hsv.h_min`. `type` is
     the simplified UI type (`int` or `float`); `minimum` / `maximum`
     come from `Field(ge=, le=)` on the source model and are `None`
     when the field has no bound (renders as a free number input).

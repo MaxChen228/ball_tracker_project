@@ -1040,22 +1040,6 @@ def test_runs_endpoint_rejects_neither_body_field(tmp_path):
     assert "must supply" in r.json()["detail"]
 
 
-def test_runs_endpoint_rejects_algorithm_mismatch(tmp_path):
-    """422 when the preset's algorithm_id does not match the URL.
-    Caller is asking the server to run hybrid_28d but pointed at a v11
-    preset — refuse loudly rather than silently switching."""
-    client = TestClient(app)
-    _arm_minimal_session_for_run_server_post(sid(74))
-    r = client.post(
-        f"/sessions/{sid(74)}/runs/hybrid_28d",
-        headers={"Accept": "application/json"},
-        json={"preset_name": "tennis"},
-    )
-    assert r.status_code == 422, r.text
-    detail = r.json()["detail"]
-    assert "v11_hsv_cc" in detail and "hybrid_28d" in detail
-
-
 def test_runs_endpoint_rejects_invalid_params_shape(tmp_path):
     """422 when params fail the detector's params_schema. Here we send
     a dict missing the required `shape_gate` block."""
@@ -1156,7 +1140,7 @@ def test_old_run_server_post_rejects_algorithm_id_in_body(tmp_path):
     r = client.post(
         f"/sessions/{sid(81)}/run_server_post",
         headers={"Accept": "application/json"},
-        json={"preset_name": "tennis", "algorithm_id": "hybrid_28d"},
+        json={"preset_name": "tennis", "algorithm_id": "v11_hsv_cc"},
     )
     assert r.status_code == 400, r.text
 
@@ -1229,55 +1213,18 @@ def test_html_runs_endpoint_honours_return_to(tmp_path):
     assert r.headers["location"] == target
 
 
-def _seed_session_with_two_algorithms(session_id: str) -> None:
-    """Plant a pitch with two server_post buckets (`v11_hsv_cc` +
-    `hybrid_28d`), each with a config snapshot stamped so callers can
-    read preset_name from `config_used_by_algorithm`. `_minimal_pitch`
-    already seeds `v11_hsv_cc` as the active pointer; we drop a second
-    bucket on top so the dropdown lookup matches a real-world session
-    that has had two algorithms run on it."""
+def _seed_session_with_v11_bucket(session_id: str) -> None:
+    """Plant a pitch with the `v11_hsv_cc` server_post bucket and a
+    matching config snapshot. `_minimal_pitch` already seeds
+    `v11_hsv_cc` as the active pointer; this just stamps a config so
+    callers can read preset_name from `config_used_by_algorithm`."""
     pitch = _minimal_pitch("A", session_id=session_id).model_copy(deep=True)
-    pitch.frames_by_algorithm["hybrid_28d"] = [
-        main.FramePayload(
-            frame_index=0, timestamp_s=0.0,
-            px=100.0, py=100.0, ball_detected=True,
-        ),
-    ]
     pitch.config_used_by_algorithm["v11_hsv_cc"] = DetectionConfigSnapshotPayload(
         algorithm_id="v11_hsv_cc",
         params=_V11_VALID_PARAMS,
         preset_name="blue_ball",
     )
-    pitch.config_used_by_algorithm["hybrid_28d"] = DetectionConfigSnapshotPayload(
-        algorithm_id="hybrid_28d",
-        params={
-            "prod_hsv": _V11_VALID_PARAMS["hsv"],
-            "prod_shape": _V11_VALID_PARAMS["shape_gate"],
-            "v11_hsv": _V11_VALID_PARAMS["hsv"],
-            "v11_shape": _V11_VALID_PARAMS["shape_gate"],
-        },
-        preset_name="hybrid_blue",
-    )
     main.state.record(pitch)
-
-
-def test_active_run_switches_pointer(tmp_path):
-    """Operator picks a different algorithm from the viewer history
-    dropdown; server flips active_server_post_algorithm_id on every
-    cam's pitch + rebuilds the SessionResult. No detection runs."""
-    client = TestClient(app)
-    _seed_session_with_two_algorithms(sid(80))
-    r = client.post(
-        f"/sessions/{sid(80)}/active_run",
-        headers={"Accept": "application/json"},
-        json={"algorithm_id": "hybrid_28d"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json() == {"ok": True, "active_algorithm_id": "hybrid_28d"}
-    assert (
-        main.state.pitches_for_session(sid(80))["A"].active_server_post_algorithm_id
-        == "hybrid_28d"
-    )
 
 
 def test_active_run_rejects_unknown_algorithm(tmp_path):
@@ -1285,7 +1232,7 @@ def test_active_run_rejects_unknown_algorithm(tmp_path):
     Catches stale viewer dropdowns rendered before the bucket was cleared
     (e.g., a different session was open in another tab)."""
     client = TestClient(app)
-    _seed_session_with_two_algorithms(sid(81))
+    _seed_session_with_v11_bucket(sid(81))
     r = client.post(
         f"/sessions/{sid(81)}/active_run",
         headers={"Accept": "application/json"},
@@ -1300,7 +1247,7 @@ def test_active_run_rejects_live_bucket(tmp_path):
     pointers; conflating them would make the viewer's main scene flip
     to iOS live coordinates on a UI mis-click."""
     client = TestClient(app)
-    _seed_session_with_two_algorithms(sid(82))
+    _seed_session_with_v11_bucket(sid(82))
     r = client.post(
         f"/sessions/{sid(82)}/active_run",
         headers={"Accept": "application/json"},
@@ -1317,7 +1264,7 @@ def test_active_run_404_unknown_session(tmp_path):
     r = client.post(
         f"/sessions/{sid(83)}/active_run",
         headers={"Accept": "application/json"},
-        json={"algorithm_id": "hybrid_28d"},
+        json={"algorithm_id": "v11_hsv_cc"},
     )
     assert r.status_code == 404, r.text
 
@@ -1326,31 +1273,13 @@ def test_active_run_rejects_missing_algorithm_id(tmp_path):
     """422 when the request body omits `algorithm_id`. The viewer
     dropdown always sends one, so this is hit-the-wire bug protection."""
     client = TestClient(app)
-    _seed_session_with_two_algorithms(sid(84))
+    _seed_session_with_v11_bucket(sid(84))
     r = client.post(
         f"/sessions/{sid(84)}/active_run",
         headers={"Accept": "application/json"},
         json={},
     )
     assert r.status_code == 422, r.text
-
-
-def test_active_run_html_form_redirects_to_return_to(tmp_path):
-    """HTML form caller (viewer history dropdown click) gets a 303
-    redirect back to `/viewer/{sid}` so the page reloads with the new
-    active pointer. Same return_to whitelist as `run_server_post` —
-    crafted bodies cannot redirect off-site."""
-    client = TestClient(app)
-    _seed_session_with_two_algorithms(sid(85))
-    target = f"/viewer/{sid(85)}"
-    r = client.post(
-        f"/sessions/{sid(85)}/active_run",
-        headers={"Accept": "text/html"},
-        data={"algorithm_id": "hybrid_28d", "return_to": target},
-        follow_redirects=False,
-    )
-    assert r.status_code == 303, r.text
-    assert r.headers["location"] == target
 
 
 def test_sessions_delete_json_returns_404_for_unknown():

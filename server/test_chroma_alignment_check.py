@@ -205,9 +205,9 @@ def test_all_builtin_presets_have_safe_hue_width():
     failures: list[str] = []
     # Walk every dict inside `params` looking for HSV-shaped entries
     # (`h_min` + `h_max` keys). Algorithm-agnostic — works for v11's
-    # single `hsv` cube and for hybrid_28d's `prod_hsv` + `v11_hsv`.
-    # Any future detector with multiple HSV bands gets checked
-    # automatically; an HSV-free detector contributes nothing.
+    # single `hsv` cube. Any future detector with multiple HSV bands
+    # gets checked automatically; an HSV-free detector contributes
+    # nothing.
     for name, preset in seeds.items():
         for hsv_key, band in preset.params.items():
             if not (isinstance(band, dict) and "h_min" in band and "h_max" in band):

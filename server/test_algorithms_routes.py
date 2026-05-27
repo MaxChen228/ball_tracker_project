@@ -114,63 +114,6 @@ def test_v11_fields_typed_int_and_float(tmp_path, monkeypatch):
     assert fields["shape_gate.fill_min"]["type"] == "float"
 
 
-# ----- field flattening (hybrid_28d) ---------------------------------
-
-
-def test_hybrid_28d_fields_includes_all_leaves(tmp_path, monkeypatch):
-    """Hybrid28dParams has 9 top-level fields, two of which are
-    HSVRangePayload and two ShapeGatePayload — flatten to 22 leaves
-    (6+6+2+2 from nested models, +6 scalar params)."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    fields = _list_entry(client, "hybrid_28d")["fields"]
-    paths = sorted(f["path"] for f in fields)
-    assert paths == sorted([
-        # PROD pool — tight HSV + shape + ball-sized area floor
-        "prod_hsv.h_min", "prod_hsv.h_max",
-        "prod_hsv.s_min", "prod_hsv.s_max",
-        "prod_hsv.v_min", "prod_hsv.v_max",
-        "prod_shape.aspect_min", "prod_shape.fill_min",
-        "prod_area_min",
-        # V11 pool — loose HSV + morph CLOSE + small-blob rescue floor
-        "v11_hsv.h_min", "v11_hsv.h_max",
-        "v11_hsv.s_min", "v11_hsv.s_max",
-        "v11_hsv.v_min", "v11_hsv.v_max",
-        "v11_shape.aspect_min", "v11_shape.fill_min",
-        "v11_area_min",
-        "v11_close_kernel",
-        # Temporal-persistence rerank knobs
-        "neigh_half",
-        "match_px",
-    ])
-
-
-def test_hybrid_28d_field_bounds_and_defaults_match_pydantic(
-    tmp_path, monkeypatch,
-):
-    """Field(ge=, le=, default=) on Hybrid28dParams must round-trip
-    through the schema export. Drift here = dashboard slider with
-    wrong range / wrong starting value."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    fields = {f["path"]: f for f in _list_entry(client, "hybrid_28d")["fields"]}
-    # Spot-check the explicitly-bounded scalar params.
-    assert fields["prod_area_min"]["minimum"] == 1
-    assert fields["prod_area_min"]["maximum"] == 10_000
-    assert fields["prod_area_min"]["default"] == 20
-    assert fields["v11_area_min"]["default"] == 3
-    assert fields["v11_close_kernel"]["minimum"] == 1
-    assert fields["v11_close_kernel"]["maximum"] == 9
-    assert fields["v11_close_kernel"]["default"] == 3
-    assert fields["neigh_half"]["minimum"] == 1
-    assert fields["neigh_half"]["maximum"] == 30
-    assert fields["neigh_half"]["default"] == 6
-    assert fields["match_px"]["minimum"] == 2.0
-    assert fields["match_px"]["maximum"] == 50.0
-    assert fields["match_px"]["default"] == 5.0
-    assert fields["match_px"]["type"] == "float"
-
-
 def test_v11_hsv_shape_fields_expose_pydantic_bounds(tmp_path, monkeypatch):
     """`HSVRangePayload` / `ShapeGatePayload` now carry `Field(ge=, le=)`
     bounds (OpenCV 8-bit HSV space + [0,1] gate ranges). The exporter

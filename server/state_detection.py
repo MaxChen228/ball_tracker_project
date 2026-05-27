@@ -431,7 +431,7 @@ def set_active_server_post_algorithm(
     to `rebuild_result_for_session`, which is canonical and cheap
     for those cases (no `triangulate_pair` runs under mono / sync
     anyway). Avoids the multi-second `triangulate_pair` × N-algo
-    cost that was making `s_f9ddcbb6` (148K-pt hybrid_28d bucket)
+    cost that was making `s_f9ddcbb6` (148K-pt multi-algorithm bucket)
     block for ~10s on every history switch.
 
     Returns the published SessionResult, or `None` if the session was

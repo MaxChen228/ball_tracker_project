@@ -166,19 +166,6 @@ _BODY_VALID = {
 }
 
 
-_BODY_VALID_HYBRID = {
-    "name": "hybrid_indoor",
-    "label": "Hybrid indoor",
-    "algorithm_id": "hybrid_28d",
-    "params": {
-        "prod_hsv": {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
-        "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
-        "v11_hsv": {"h_min": 103, "h_max": 118, "s_min": 120, "s_max": 255, "v_min": 30, "v_max": 255},
-        "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
-    },
-}
-
-
 def test_create_preset_persists_to_disk(tmp_path, monkeypatch):
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
@@ -322,21 +309,6 @@ def test_create_preset_v11_rejects_extra_param_field(tmp_path, monkeypatch):
     assert r.status_code == 422, r.text
 
 
-def test_create_preset_hybrid_rejects_extra_param_field(tmp_path, monkeypatch):
-    """Same `extra='forbid'` contract on Hybrid28dParams — pinned
-    independently because the two schemas are independent classes
-    and extra-handling could regress on one without the other."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    bad = {
-        **_BODY_VALID_HYBRID,
-        "name": "hybrid_extra",
-        "params": {**_BODY_VALID_HYBRID["params"], "rogue_field": 42},
-    }
-    r = client.post("/presets", json=bad)
-    assert r.status_code == 422, r.text
-
-
 def test_create_preset_malformed_algorithm_id_returns_400(tmp_path, monkeypatch):
     """An algorithm_id that doesn't match the slug regex (capitals,
     dashes, too long) is structurally invalid — 400, distinct from
@@ -352,29 +324,6 @@ def test_create_preset_malformed_algorithm_id_returns_400(tmp_path, monkeypatch)
         # Empty string falls through to "missing field" 400 first,
         # which is also 400 — both branches are correct here.
         assert r.status_code == 400, (bad_id, r.text)
-
-
-def test_create_hybrid_preset_persists_without_touching_live(tmp_path, monkeypatch):
-    """POST a hybrid_28d preset → file written; live `DetectionConfig`
-    must NOT change (it's still v11_hsv_cc). Phase-3 will introduce a
-    dual active state where hybrid can sit in the server_post slot.
-    Until then, creating a non-v11 preset is pure persistence."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    before_cfg = main.state.detection_config()
-    r = client.post("/presets", json=_BODY_VALID_HYBRID)
-    assert r.status_code == 200, r.text
-    assert (tmp_path / "presets" / "hybrid_indoor.json").exists()
-    after_cfg = main.state.detection_config()
-    # Live config untouched — same preset name, same algorithm_id.
-    assert after_cfg.preset == before_cfg.preset
-    assert after_cfg.algorithm_id == before_cfg.algorithm_id
-    # And the new preset reads back canonical.
-    r = client.get("/presets/hybrid_indoor")
-    p = r.json()
-    assert p["algorithm_id"] == "hybrid_28d"
-    assert p["params"]["prod_hsv"]["h_min"] == 105
-    assert p["params"]["v11_hsv"]["h_max"] == 118
 
 
 # ----- set active ----------------------------------------------------
@@ -416,28 +365,10 @@ def test_set_active_preset_rejects_missing_name(tmp_path, monkeypatch):
     assert r.status_code == 400, r.text
 
 
-def test_set_active_live_rejects_non_v11_preset(tmp_path, monkeypatch):
-    """`target=live` only accepts v11_hsv_cc (iOS-side detection is
-    hardcoded HSV+CC). Activating a hybrid_28d preset on the live slot
-    would lie about what's running on iOS — reject 422."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    assert main.state.preset_exists("hybrid_28d_blue_ball")
-    before = main.state.detection_config().preset
-    r = client.post(
-        "/presets/active",
-        json={"name": "hybrid_28d_blue_ball", "target": "live"},
-    )
-    assert r.status_code == 422, r.text
-    assert "hybrid_28d" in r.json()["detail"]
-    assert main.state.detection_config().preset == before
-
-
 def test_set_active_requires_target(tmp_path, monkeypatch):
-    """Phase-3: `target` is required (no default). Operator must
-    explicitly choose live vs server_post — silent default to "live"
-    would tempt the dashboard into not thinking about which slot it's
-    driving and would silently no-op a hybrid preset Apply."""
+    """`target` is required (no default). Operator must explicitly
+    choose live vs server_post — silent default to "live" would tempt
+    the dashboard into not thinking about which slot it's driving."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     r = client.post("/presets/active", json={"name": "blue_ball"})
@@ -456,25 +387,24 @@ def test_set_active_rejects_invalid_target(tmp_path, monkeypatch):
     assert "target" in r.json()["detail"]
 
 
-def test_set_active_server_post_accepts_hybrid_preset(tmp_path, monkeypatch):
-    """`target=server_post` accepts any registered algorithm. Switching
-    to hybrid_28d here must NOT touch live `DetectionConfig` and must
-    NOT broadcast WS settings (iOS doesn't run the server_post
-    algorithm). State is persisted to a sidecar file so a restart
-    keeps the operator's choice."""
+def test_set_active_server_post_accepts_v11_preset(tmp_path, monkeypatch):
+    """server_post slot accepts any registered algorithm — currently
+    only v11. POST to switch to a different v11 preset must NOT touch
+    live `DetectionConfig` and must NOT broadcast WS settings (iOS
+    doesn't run the server_post algorithm). State is persisted to a
+    sidecar file so a restart keeps the operator's choice."""
     main = _fresh_main(tmp_path, monkeypatch)
     client = TestClient(main.app)
     live_before = main.state.detection_config()
     r = client.post(
         "/presets/active",
-        json={"name": "hybrid_28d_blue_ball", "target": "server_post"},
+        json={"name": "blue_ball", "target": "server_post"},
     )
     assert r.status_code == 200, r.text
     assert r.json() == {
-        "ok": True, "active": "hybrid_28d_blue_ball", "target": "server_post",
+        "ok": True, "active": "blue_ball", "target": "server_post",
     }
-    # server_post slot updated.
-    assert main.state.active_server_post_preset_name() == "hybrid_28d_blue_ball"
+    assert main.state.active_server_post_preset_name() == "blue_ball"
     # Live unchanged.
     live_after = main.state.detection_config()
     assert live_after.preset == live_before.preset
@@ -483,21 +413,7 @@ def test_set_active_server_post_accepts_hybrid_preset(tmp_path, monkeypatch):
     sidecar = tmp_path / "active_server_post_preset.json"
     assert sidecar.exists()
     import json
-    assert json.loads(sidecar.read_text()) == {"name": "hybrid_28d_blue_ball"}
-
-
-def test_set_active_server_post_accepts_v11_preset(tmp_path, monkeypatch):
-    """server_post slot accepts v11 too — operator is free to run the
-    same algorithm in both slots, or use hybrid as oracle while keeping
-    v11 live. No algorithm constraint on server_post."""
-    main = _fresh_main(tmp_path, monkeypatch)
-    client = TestClient(main.app)
-    r = client.post(
-        "/presets/active",
-        json={"name": "blue_ball", "target": "server_post"},
-    )
-    assert r.status_code == 200, r.text
-    assert main.state.active_server_post_preset_name() == "blue_ball"
+    assert json.loads(sidecar.read_text()) == {"name": "blue_ball"}
 
 
 def test_set_active_server_post_unknown_preset_returns_404(
@@ -532,11 +448,11 @@ def test_active_server_post_preset_persisted_across_restart(
     client = TestClient(main.app)
     client.post(
         "/presets/active",
-        json={"name": "hybrid_28d_blue_ball", "target": "server_post"},
+        json={"name": "blue_ball", "target": "server_post"},
     )
     # Simulate restart.
     fresh = main.State(data_dir=tmp_path)
-    assert fresh.active_server_post_preset_name() == "hybrid_28d_blue_ball"
+    assert fresh.active_server_post_preset_name() == "blue_ball"
 
 
 def test_active_server_post_first_boot_writes_sidecar_explicitly(
@@ -579,9 +495,9 @@ def test_delete_preset_rejects_active_server_post_slot(
     client = TestClient(main.app)
     client.post(
         "/presets/active",
-        json={"name": "hybrid_28d_blue_ball", "target": "server_post"},
+        json={"name": "blue_ball", "target": "server_post"},
     )
-    r = client.delete("/presets/hybrid_28d_blue_ball")
+    r = client.delete("/presets/blue_ball")
     assert r.status_code == 409, r.text
     assert "server_post" in r.json()["detail"]
 
@@ -609,13 +525,13 @@ def test_active_server_post_sidecar_shape_pinned(tmp_path, monkeypatch):
     client = TestClient(main.app)
     client.post(
         "/presets/active",
-        json={"name": "hybrid_28d_blue_ball", "target": "server_post"},
+        json={"name": "blue_ball", "target": "server_post"},
     )
     import json
     sidecar = tmp_path / "active_server_post_preset.json"
     body = json.loads(sidecar.read_text())
     assert set(body.keys()) == {"name"}
-    assert body["name"] == "hybrid_28d_blue_ball"
+    assert body["name"] == "blue_ball"
 
 
 # ----- delete --------------------------------------------------------
@@ -678,10 +594,9 @@ def test_dashboard_shows_deleted_when_bound_preset_removed(tmp_path, monkeypatch
     main = _fresh_main(tmp_path, monkeypatch)
     from detection_config import DetectionConfig
 
-    # Bind live to blue_ball cleanly. Server_post slot would also pin
-    # the preset against deletion (boot init = "tennis"), so move it
-    # to a third preset before forcing live to blue_ball + delete.
-    main.state.set_active_server_post_preset("hybrid_28d_blue_ball")
+    # Bind live to blue_ball cleanly. Server_post slot defaults to
+    # "tennis" at boot, which doesn't collide with the blue_ball
+    # delete below, so no extra slot move needed here.
     bb = main.state.load_preset("blue_ball")
     main.state.set_detection_config(DetectionConfig(
         hsv=bb.hsv, shape_gate=bb.shape_gate,

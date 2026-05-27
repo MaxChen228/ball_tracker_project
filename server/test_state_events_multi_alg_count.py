@@ -37,36 +37,9 @@ def test_single_server_algorithm_yields_count_1(tmp_path):
     assert _event_for(build_events(s), sid)["n_server_post_algorithms"] == 1
 
 
-def test_two_server_algorithms_yields_count_2(tmp_path):
-    s = State(data_dir=tmp_path)
-    sid = _sid(2)
-    s.record(_pitch(
-        "A", sid, alg_keys=["ios_capture_time", "v11_hsv_cc", "hybrid_28d"],
-    ))
-    s.record(_pitch(
-        "B", sid, alg_keys=["ios_capture_time", "v11_hsv_cc", "hybrid_28d"],
-    ))
-    assert _event_for(build_events(s), sid)["n_server_post_algorithms"] == 2
-
-
 def test_live_only_session_yields_count_0(tmp_path):
     s = State(data_dir=tmp_path)
     sid = _sid(3)
     s.record(_pitch("A", sid, alg_keys=["ios_capture_time"]))
     s.record(_pitch("B", sid, alg_keys=["ios_capture_time"]))
     assert _event_for(build_events(s), sid)["n_server_post_algorithms"] == 0
-
-
-def test_union_across_cams_when_only_one_cam_ran_extra_algorithm(tmp_path):
-    """If cam A's pitch carries an extra server algorithm bucket that
-    cam B's doesn't (e.g., A was rerun under hybrid_28d but B's pitch
-    on disk is stale), the union — not the intersection — drives the
-    count. Mirrors viewer's `_all_algos |= set(p.frames_by_algorithm.keys())`
-    loop, which is also a union."""
-    s = State(data_dir=tmp_path)
-    sid = _sid(4)
-    s.record(_pitch(
-        "A", sid, alg_keys=["ios_capture_time", "v11_hsv_cc", "hybrid_28d"],
-    ))
-    s.record(_pitch("B", sid, alg_keys=["ios_capture_time", "v11_hsv_cc"]))
-    assert _event_for(build_events(s), sid)["n_server_post_algorithms"] == 2

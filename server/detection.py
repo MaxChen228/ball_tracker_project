@@ -118,9 +118,9 @@ class ShapeGate:
 
 @functools.lru_cache(maxsize=16)
 def _close_kernel(size: int) -> np.ndarray:
-    """Cached elliptical structuring element. The hybrid_28d pass-1
-    iterates over thousands of frames re-allocating an identical kernel
-    each call; cache by size keeps construction O(unique sizes)."""
+    """Cached elliptical structuring element. Callers iterating over
+    thousands of frames re-allocate an identical kernel each call;
+    cache by size keeps construction O(unique sizes)."""
     return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
 
 
@@ -135,16 +135,12 @@ def _run_hsv_emit_pipeline(
 ) -> "list[BlobCandidate]":
     """Shared HSV → (optional morph CLOSE) → CC → shape gate → cost-stamp
     pipeline. Caller decides ranking / winner-select. `close_kernel=None`
-    skips morphology (PROD / v11_hsv_cc); a small odd int runs
-    `cv2.MORPH_CLOSE` with that elliptical kernel size (hybrid_28d V11
-    fallback). `area_min` is per-pool: v11_hsv_cc and hybrid_28d's PROD
-    pool use 20 (ball-sized only), hybrid_28d's V11 pool uses 3 (rescue
-    micro-blobs whose persistence rerank can still distinguish them from
-    clutter — see `algorithms/hybrid_28d.py:Hybrid28dParams`).
+    skips morphology (v11_hsv_cc default); a small odd int runs
+    `cv2.MORPH_CLOSE` with that elliptical kernel size. `area_min` gates
+    out sub-ball blobs (v11_hsv_cc uses 20 — ball-sized only).
 
     `is_hsv=True` skips the `cvtColor(BGR2HSV)` step — callers that already
-    converted (e.g. hybrid_28d pass-1, where the PROD + V11 detector arms
-    share one HSV conversion per frame) pass the HSV array directly."""
+    converted pass the HSV array directly."""
     from candidate_selector import Candidate, score_candidates
     from schemas import BlobCandidate
 

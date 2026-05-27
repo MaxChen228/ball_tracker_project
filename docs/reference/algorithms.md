@@ -14,7 +14,6 @@ Module-level dict of `AlgorithmEntry` records keyed by `algorithm_id`:
 | `algorithm_id`      | Runnable | Role                                                                    |
 |---------------------|----------|-------------------------------------------------------------------------|
 | `v11_hsv_cc`        | ✅       | HSV + connectedComponents + shape gate (driven by `detection.py`).      |
-| `hybrid_28d`        | ✅       | 28-dimensional hybrid detector.                                         |
 | `ios_capture_time`  | ❌       | Sentinel for the live-bucket dict key. Constant `IOS_CAPTURE_TIME_ALGORITHM_ID`. |
 
 Each runnable entry carries:
@@ -59,8 +58,8 @@ gone (b15a611 + bc0e92e); `POST /sessions/{sid}/recompute` accepts only
 dicts keyed by `algorithm_id`:
 
 - **Live path** → key is the sentinel `ios_capture_time`.
-- **server_post path** → key is the runnable detector id (`v11_hsv_cc`,
-  `hybrid_28d`, …).
+- **server_post path** → key is the runnable detector id (currently
+  `v11_hsv_cc`; future detectors register through this same dict).
 
 `active_server_post_algorithm_id` points at the bucket the viewer projects.
 Re-running a different algorithm flips the pointer; prior buckets stay in
@@ -80,8 +79,8 @@ editor.
 
 ## Preset binding
 
-Every named preset binds to exactly one `algorithm_id`. `v11_hsv_cc` and
-`hybrid_28d` presets are NOT interchangeable. The dashboard Apply form
+Every named preset binds to exactly one `algorithm_id`. Presets for
+different algorithms are NOT interchangeable. The dashboard Apply form
 POSTs `{name, label, algorithm_id, params}` — `params` is validated
 against the algorithm's `params_schema`. See
 [../operations.md](../operations.md) for the preset library workflow.

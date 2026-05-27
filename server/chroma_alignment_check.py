@@ -169,13 +169,11 @@ def load_preset_range(preset_name: str) -> HSVRangeLite:
     p = presets.load_preset(DATA_DIR, preset_name)
     if p.algorithm_id == algorithms.V11_HSV_CC:
         h = p.params["hsv"]
-    elif p.algorithm_id == algorithms.HYBRID_28D:
-        h = p.params["prod_hsv"]
     else:
         raise SystemExit(
             f"--preset {preset_name!r}: algorithm {p.algorithm_id!r} has no "
             "HSV cube this tool knows how to extract. Supported: "
-            "v11_hsv_cc (params.hsv), hybrid_28d (params.prod_hsv)."
+            "v11_hsv_cc (params.hsv)."
         )
     return HSVRangeLite(
         h_min=h["h_min"], h_max=h["h_max"],

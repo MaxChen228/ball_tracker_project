@@ -234,8 +234,8 @@ def _cfg_strip_html(e: dict[str, Any]) -> str:
             )
         name = cfg.get("preset_name")
         tip = _tip(cfg)
-        # SVR axis varies by algorithm (v11_hsv_cc / hybrid_28d / future) so
-        # the chip body shows `<alg>/<preset>` — matches viewer SVR pill.
+        # SVR axis varies by registered algorithm so the chip body
+        # shows `<alg>/<preset>` — matches viewer SVR pill.
         # LIVE axis is fixed (iOS always v11_hsv_cc) so the prefix is constant
         # and uninformative; the tooltip carries the full alg+param detail.
         prefix = (

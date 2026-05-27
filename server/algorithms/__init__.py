@@ -20,14 +20,12 @@ from algorithms.base import (
     FrameIteratorFactory,
     ProgressCallback,
 )
-from algorithms.hybrid_28d import Hybrid28dDetector
 from algorithms.v11_hsv_cc import V11Detector
 
 if TYPE_CHECKING:
     from schemas import FramePayload
 
 V11_HSV_CC = "v11_hsv_cc"
-HYBRID_28D = "hybrid_28d"
 
 DEFAULT_ALGORITHM_ID = V11_HSV_CC
 
@@ -102,23 +100,6 @@ _REGISTRY: dict[str, AlgorithmEntry] = {
             "the 1073-frame GT set."
         ),
         detector=V11Detector(),
-        cost_threshold=0.5,
-    ),
-    HYBRID_28D: AlgorithmEntry(
-        algorithm_id=HYBRID_28D,
-        label="Hybrid PROD + V11 motion-rescue (28d)",
-        description=(
-            "Per frame: if PROD (tight HSV+shape gate) emits ≥1 cand → "
-            "rank by shape cost; else fall back to V11 (loose HSV + "
-            "morphology CLOSE + loose shape gate) ranked by motion-"
-            "novelty (persistence in ±neigh_half window) then shape "
-            "cost. Lab eval (PR #112): R_top1=0.660 on 1956 GT frames, "
-            "+0.045 over PROD baseline 0.615; 0/15 session regressions."
-        ),
-        detector=Hybrid28dDetector(),
-        # Same gate as v11 — both detectors emit through the shared
-        # `candidate_selector.score_candidates` cost function on
-        # aspect+fill, so the threshold envelope is identical.
         cost_threshold=0.5,
     ),
 }

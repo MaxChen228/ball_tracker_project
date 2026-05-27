@@ -74,10 +74,10 @@ def _render_manage_modal(presets: list[Preset], active_preset: object) -> str:
         row_html = []
         for p in presets:
             current = "★ current" if p.name == active_preset else ""
-            # Algorithm column makes non-v11 presets (hybrid_28d, etc.)
-            # legible in the modal even though Use / Duplicate via this
-            # UI is v11-only. The Use button is rendered for non-v11
-            # too (server-side `/presets/active` still works), but
+            # Algorithm column keeps the modal legible even if future
+            # non-v11 presets land on disk; Use / Duplicate via this
+            # UI is v11-only. The Use button is rendered for any
+            # algorithm (server-side `/presets/active` still works), but
             # Duplicate falls back to a clear "non-v11 not supported"
             # status message in 15_hsv_controls.js.
             row_html.append(
@@ -211,11 +211,11 @@ def _render_hsv_body(
 
     # Preset picker --------------------------------------------------
     # The dashboard HSV section is v11_hsv_cc-only — its sliders edit
-    # `hsv` + `shape_gate`. Non-v11 presets exist on disk but are not
-    # editable from this UI; filter them out so a hybrid_28d preset
-    # doesn't render a broken button (its `.hsv` accessor raises).
-    # When a non-v11 algorithm grows its own dashboard surface, that
-    # surface will iterate `presets` filtered to its own algorithm_id.
+    # `hsv` + `shape_gate`. Filter to v11 presets so any future non-v11
+    # preset on disk doesn't render a broken button (its `.hsv`
+    # accessor would raise). When a non-v11 algorithm grows its own
+    # dashboard surface, that surface will iterate `presets` filtered
+    # to its own algorithm_id.
     v11_presets = [p for p in presets if p.algorithm_id == algorithms.V11_HSV_CC]
 
     def _preset_button(p: Preset) -> str:

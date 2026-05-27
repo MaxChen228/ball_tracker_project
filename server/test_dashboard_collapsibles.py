@@ -78,24 +78,6 @@ def _snapshot_v11(preset="tennis"):
     }
 
 
-def _snapshot_hybrid(preset="hybrid_28d_blue_ball"):
-    return {
-        "algorithm_id": "hybrid_28d",
-        "params": {
-            "prod_hsv": {"h_min": 105, "h_max": 112, "s_min": 140, "s_max": 255, "v_min": 40, "v_max": 255},
-            "prod_shape": {"aspect_min": 0.75, "fill_min": 0.55},
-            "prod_area_min": 20,
-            "v11_hsv": {"h_min": 103, "h_max": 118, "s_min": 120, "s_max": 255, "v_min": 30, "v_max": 255},
-            "v11_shape": {"aspect_min": 0.40, "fill_min": 0.35},
-            "v11_area_min": 3,
-            "v11_close_kernel": 3,
-            "neigh_half": 6,
-            "match_px": 5.0,
-        },
-        "preset_name": preset,
-    }
-
-
 def test_events_card_renders_v11_snapshot_without_keyerror():
     """Regression for the cfg-strip tip reading top-level `hsv` —
     canonical snapshot shape is `{algorithm_id, params: {hsv, shape_gate}, preset_name}`
@@ -108,20 +90,6 @@ def test_events_card_renders_v11_snapshot_without_keyerror():
     html = _render_events_body([e])
     assert "ev-cfg-chip" in html
     assert "tennis" in html
-
-
-def test_events_card_renders_hybrid_snapshot_without_keyerror():
-    """Hybrid snapshot has no top-level `hsv` / `shape_gate` — it
-    carries `prod_hsv` / `v11_hsv`. The cfg-strip tip dispatch on
-    algorithm_id, with a hybrid-specific layout."""
-    e = {
-        "session_id": "s_hyb", "created_day": "2026-05-04", "created_hm": "10:00",
-        "live_config_used": _snapshot_v11(),  # live always v11
-        "server_post_config_used": _snapshot_hybrid(),
-    }
-    html = _render_events_body([e])
-    assert "hybrid_28d_blue_ball" in html
-    assert "tennis" in html  # live chip
 
 
 def test_dashboard_chip_has_no_run_srv_form():
