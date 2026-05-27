@@ -188,10 +188,19 @@ final class CameraSyncCoordinator {
 
     private func startMutualSync() {
         let role = deps.getCameraRole()
+        // Mutual chirp sync is intrinsically pair-wise: the two phones
+        // exchange chirps on distinct frequency bands (A vs B, defined
+        // in MutualSyncAudio.swift). A third camera (e.g. role "C")
+        // joining the rig CAN run capture / detection / heartbeat
+        // perfectly fine, but it does NOT participate in this pair-
+        // wise sync — broadcasting from a third role would require
+        // additional band assignments and is a future-phase change.
+        // Today this guard is the explicit firewall that keeps non-
+        // A/B roles from emitting on an undefined band.
         guard role == "A" || role == "B" else {
-            syncLog.error("sync_run rejected unknown role=\(role, privacy: .public)")
+            syncLog.error("sync_run skipped non-pair role=\(role, privacy: .public)")
             deps.uploader().postSyncLog(event: "reject", detail: [
-                "reason": .string("unknown_role"),
+                "reason": .string("non_pair_role_skips_mutual_sync"),
                 "role": .string(role),
             ])
             pendingSyncId = nil

@@ -23,9 +23,18 @@ final class CameraMonitorOverlayView {
 
     // MARK: - Private
 
+    /// Roles the operator can pick from. Pair-rig baseline is A + B.
+    /// Grow this list (or wire it to `AppSettingsStore` / `UserDefaults`)
+    /// when a third camera joins the rig — the rest of the overlay is
+    /// data-driven over `roleButtons.keys`, so no further UI code change
+    /// is needed.
+    private static let availableRoles: [String] = ["A", "B"]
+
     private let topBar = UIView()
-    private let roleButtonA = _RoleButton(title: "A")
-    private let roleButtonB = _RoleButton(title: "B")
+    /// camera_id → role chip button. Built once at install time from
+    /// `availableRoles`. Tapping a button fires `onRoleChanged` after
+    /// updating the cached `_selectedRole`.
+    private var roleButtons: [String: _RoleButton] = [:]
     private let ipValueLabel = UILabel()
     private let linkLED = UIView()
     private let statusTextLabel = UILabel()  // mirrors connectionLabel text
@@ -49,10 +58,16 @@ final class CameraMonitorOverlayView {
         topBar.addSubview(bottomBorder)
 
         // ── Row 1: role  ·  LED+status  ·  chip ─────────────────────────
-        [roleButtonA, roleButtonB].forEach {
-            $0.addTarget(self, action: #selector(handleRoleButton(_:)), for: .touchUpInside)
+        // Build one button per role in `availableRoles`. The dict
+        // keyed by camera_id lets the tap handler resolve the source
+        // button to its role label without an isEqual chain.
+        let buttons: [_RoleButton] = Self.availableRoles.map { role in
+            let btn = _RoleButton(title: role)
+            btn.addTarget(self, action: #selector(handleRoleButton(_:)), for: .touchUpInside)
+            self.roleButtons[role] = btn
+            return btn
         }
-        let roleStack = UIStackView(arrangedSubviews: [roleButtonA, roleButtonB])
+        let roleStack = UIStackView(arrangedSubviews: buttons)
         roleStack.axis = .horizontal
         roleStack.spacing = 4
         roleStack.alignment = .center
@@ -186,8 +201,12 @@ final class CameraMonitorOverlayView {
 
     func syncRole(cameraRole: String) {
         _selectedRole = cameraRole
-        roleButtonA.isSelected = (cameraRole == "A")
-        roleButtonB.isSelected = (cameraRole == "B")
+        // Single-source iteration over the role buttons dict; adding a
+        // third camera grows the rig's button row without touching this
+        // method.
+        for (role, btn) in roleButtons {
+            btn.isSelected = (role == cameraRole)
+        }
     }
 
     var selectedCameraRole: String { _selectedRole }
@@ -223,7 +242,16 @@ final class CameraMonitorOverlayView {
     // MARK: - Private
 
     @objc private func handleRoleButton(_ sender: _RoleButton) {
-        syncRole(cameraRole: sender === roleButtonA ? "A" : "B")
+        // Reverse-resolve the tapped button to its role label via the
+        // `roleButtons` dict. A spurious tap from an unregistered button
+        // (impossible in production — every button is installed via
+        // `availableRoles`) is a programmer error; bail without firing
+        // the callback rather than masking it with a silent default.
+        guard let role = roleButtons.first(where: { $0.value === sender })?.key else {
+            assertionFailure("CameraMonitorOverlayView: tap from unregistered role button")
+            return
+        }
+        syncRole(cameraRole: role)
         onRoleChanged?()
     }
 
