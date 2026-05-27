@@ -165,11 +165,22 @@ def load_preset_range(preset_name: str) -> HSVRangeLite:
     Imports `presets` lazily so --synthetic mode runs without server
     package state (smoke tests / CI without `data/`)."""
     import presets  # type: ignore
+    import algorithms  # type: ignore
     p = presets.load_preset(DATA_DIR, preset_name)
+    if p.algorithm_id == algorithms.V11_HSV_CC:
+        h = p.params["hsv"]
+    elif p.algorithm_id == algorithms.HYBRID_28D:
+        h = p.params["prod_hsv"]
+    else:
+        raise SystemExit(
+            f"--preset {preset_name!r}: algorithm {p.algorithm_id!r} has no "
+            "HSV cube this tool knows how to extract. Supported: "
+            "v11_hsv_cc (params.hsv), hybrid_28d (params.prod_hsv)."
+        )
     return HSVRangeLite(
-        h_min=p.hsv.h_min, h_max=p.hsv.h_max,
-        s_min=p.hsv.s_min, s_max=p.hsv.s_max,
-        v_min=p.hsv.v_min, v_max=p.hsv.v_max,
+        h_min=h["h_min"], h_max=h["h_max"],
+        s_min=h["s_min"], s_max=h["s_max"],
+        v_min=h["v_min"], v_max=h["v_max"],
     )
 
 
