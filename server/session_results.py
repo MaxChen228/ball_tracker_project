@@ -270,8 +270,8 @@ def _triangulate_non_current_algorithms(
     for alg_id in sorted(candidate_algs):
         if alg_id == IOS_CAPTURE_TIME or alg_id in current_algs:
             continue
-        frames_a = a.frames_by_algorithm.get(alg_id) or []
-        frames_b = b.frames_by_algorithm.get(alg_id) or []
+        frames_a = a.frames_by_algorithm.get(alg_id, [])
+        frames_b = b.frames_by_algorithm.get(alg_id, [])
         if not frames_a or not frames_b:
             continue
         try:
@@ -630,7 +630,7 @@ def stamp_segments_on_result(
     result.segments_by_algorithm.clear()
 
     for path in path_priority:
-        pts = result.triangulated_by_path.get(path) or []
+        pts = result.triangulated_by_path.get(path, [])
         if not pts:
             continue
         path_alg = _algorithm_id_for_result_path(result, path)
@@ -660,7 +660,7 @@ def stamp_segments_on_result(
 
     authority_path: str | None = None
     for path in path_priority:
-        pts = result.triangulated_by_path.get(path) or []
+        pts = result.triangulated_by_path.get(path, [])
         if pts:
             authority_path = path
             break
