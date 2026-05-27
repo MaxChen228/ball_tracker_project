@@ -27,7 +27,23 @@
       });
       renderSession(s);
       if (typeof renderStrikeZone === 'function') renderStrikeZone(s);
-    } catch (e) { /* silent retry next tick */ }
+    } catch (e) {
+      // Network blips / transient 5xx are expected to recover on the
+      // next tick — log without surfacing UI. But surface a hard
+      // template-bootstrap failure (e.g. EXPECTED_CAMS dict missing
+      // a LED slot) via nav-status so the operator can self-diagnose
+      // instead of staring at frozen LEDs forever.
+      const isBootstrapError = e && e.message
+        && /bootstrap|missing .* DOM|EXPECTED/i.test(e.message);
+      if (isBootstrapError && navStatus && !navStatus.dataset.errored) {
+        navStatus.dataset.errored = '1';
+        navStatus.textContent = `DASHBOARD BOOTSTRAP ERROR — ${e.message}`;
+        navStatus.style.color = '#C0392B';
+        console.error('[dashboard]', e);
+      } else {
+        console.debug('[tickStatus] transient', e);
+      }
+    }
   }
 
   // Skip the per-camera-marker rebuild when the JSON signature of the

@@ -57,6 +57,23 @@ Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). i
 
 Triangulation requires **both** cameras to have `intrinsics` and `homography` present AND `sync_anchor_timestamp_s` non-null — if any is missing, `SessionResult.error` is set and triangulation is skipped (raw payload + MOV are still persisted for forensics).
 
+### N-camera infra schema (camera_id-keyed dicts)
+
+The legacy per-cam-A/B flat fields on `SessionResult` and `SyncResult` were collapsed into camera_id-keyed dicts so the wire schema scales past the 2-camera rig without further re-cuts. Two-camera deployments stay wire-compatible by carrying `"A"` and `"B"` keys; a future third camera grows the dict.
+
+**`SessionResult`** (`server/schemas.py:506`):
+- `cameras_received: dict[str, bool]` — camera_id → "did this session ingest a pitch from this cam". Replaced the pair `camera_a_received: bool` / `camera_b_received: bool`. Today's keys are `{"A","B"}`; downstream "paired" semantics is `bool(received) and all(received.values())`. Sentinel for "session not found in result store" is `cameras_received={}` (empty dict) — explicit "rig configuration unknown" state, distinct from "all roles failed".
+
+**`SyncResult`** (`server/schemas.py:822`) — mutual chirp sync outcome:
+- `times_by_role: dict[str, RoleSyncTimes]` — camera_id → `{t_self_s, t_from_other_s}`. Replaced the four flat fields `t_a_self_s` / `t_a_from_b_s` / `t_b_self_s` / `t_b_from_a_s`.
+- `traces_by_role: dict[str, RoleSyncTraces]` — camera_id → `{self_trace, other_trace}` matched-filter traces. Replaced the four flat fields `trace_a_self` / `trace_a_other` / `trace_b_self` / `trace_b_other`.
+- Mutual sync is intrinsically pair-wise (audio chirp on distinct frequency bands wired per-role in `ball_tracker/MutualSyncAudio.swift`); today only `"A"` + `"B"` ever appear as keys. Missing key = that role never reported (vs. present-with-None inside the inner model = role reported but its scalar was null).
+- `sync_analysis._mutual_math` reads via `(times_by_role).get(role).get(key)` with explicit `isinstance(dict, ...)` branching — no `or {}` silent fallback.
+
+**Dashboard wire**: dashboard JS reads `window.__EXPECTED_CAMS__`, SSR-injected by `render_dashboard_html` from `State.expected_camera_ids()` (returns `sorted(known_cameras | calibrated_cameras | _RIG_BASELINE_CAMERAS={"A","B"})`). Adding a third camera to the rig: heartbeat it once OR upload its calibration, and the dashboard's LED strip / device grid / preview tiles all grow automatically.
+
+**iOS wire**: iOS does NOT consume `SessionResult` or `SyncResult` — those are server-internal / dashboard surfaces. `CameraMonitorOverlayView.availableRoles: ["A","B"]` is the iOS-side rig roster (data-driven N-button row); grow by editing that constant. `CameraSyncCoordinator.startMutualSync` keeps the `role == "A" || "B"` guard (mutual sync's pair-wise frequency-band assignment is undefined for `"C"`).
+
 ## Server-post detection — `POST /sessions/{sid}/runs/{algorithm_id}` + alias
 
 Operator triggers a server-side detection run against the archived MOVs of every camera in the session. Handler: `server/routes/sessions.py::sessions_run_algorithm`; both endpoints share `_dispatch_server_post`, which validates the session id, gates on `state.processing.session_candidates`, and queues `_run_server_detection` (`server/routes/pitch.py`) as a FastAPI BackgroundTask per camera.
