@@ -79,3 +79,8 @@ server/charuco_board.png
 
 .DS_Store
 lab/research/outputs/
+
+# Ad-hoc artifacts that occasionally land in repo root (PDF cleanup
+# experiments etc.). Not part of the project; keep them ignored so a
+# stray `git add -A` can't pull them in.
+pdf_cleaning_outputs/
