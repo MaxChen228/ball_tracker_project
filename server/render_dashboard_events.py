@@ -294,8 +294,6 @@ def _actions_html(e: dict[str, Any], sid: str,
                   processing_state: str, trashed: bool) -> str:
     parts: list[str] = []
 
-    path_status = e.get("path_status") or {}
-    server_status = path_status.get("server_post") or "-"
     if processing_state in {"queued", "processing"}:
         parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
     if trashed:
