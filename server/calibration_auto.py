@@ -433,7 +433,7 @@ def _video_basis_intrinsics(
     Without this carry-over the rebuild path silently degrades the prior
     precision (ChArUco RMS ~0.5 px, or a previously-converged auto-cal
     snapshot's accumulated fx/fy) to pure FOV approximation (~1-3 % fx
-    error, per CLAUDE.md / docs/iphone_camera_formats.md).
+    error, per CLAUDE.md / docs/reference/iphone-camera-formats.md).
 
     The `"snapshot"` branch matters operationally: per CLAUDE.md, every
     recalibration must "preserve existing intrinsics, only update

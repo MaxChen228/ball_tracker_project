@@ -741,7 +741,7 @@ final class CameraCaptureRuntime {
     private func findLargestPhotoFormat(device: AVCaptureDevice) -> AVCaptureDevice.Format? {
         // Prefer non-binned formats supporting ≥30 fps (photo-capable);
         // pick the format with the largest pixel area. iPhone 14+ wide
-        // cam: format[58]/[59] 4032×3024 4:3 (see docs/iphone_camera_formats.md).
+        // cam: format[58]/[59] 4032×3024 4:3 (see docs/reference/iphone-camera-formats.md).
         let candidates = device.formats.filter { format in
             let supports30 = format.videoSupportedFrameRateRanges.contains { range in
                 range.minFrameRate <= 30 && range.maxFrameRate >= 30

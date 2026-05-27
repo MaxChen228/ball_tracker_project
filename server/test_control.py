@@ -1848,7 +1848,7 @@ def test_settings_message_excludes_dead_wire_fields():
       • `mutual_sync_threshold`: server-side two-device coordinator
         cutoff; iOS has no mutual-sync logic client-side.
     Pin all three so a future "let's just push it too" addition trips
-    here. Key list is also in docs/protocols.md (WS settings) — keep
+    here. Key list is also in docs/reference/protocols.md (WS settings) — keep
     both in lockstep."""
     msg = main._settings_message_for("A")
     assert "algorithm_id" not in msg

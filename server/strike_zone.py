@@ -181,7 +181,7 @@ def judge_pitch_strike(
     Segs[1:] are intentionally ignored.
 
     Trajectory: p(τ) = p0 + v0·τ + ½·g·τ², gravity on +Z only.
-    World frame (docs/protocols.md): +Y points pitcher → catcher; plate
+    World frame (docs/reference/protocols.md): +Y points pitcher → catcher; plate
     front face at y=0, tip at y≈0.432.
 
     y(τ) is linear in τ, so the τ-interval where y∈[y_front, y_back] is

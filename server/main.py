@@ -499,7 +499,7 @@ def _settings_message_for(camera_id: str) -> dict[str, Any]:
     #     act on it; readable from `/status` JSON.
     #   • `mutual_sync_threshold`: server-side two-device coordinator
     #     cutoff; iOS has no mutual-sync logic client-side.
-    # Key list is pinned in docs/protocols.md (WS settings) — keep this
+    # Key list is pinned in docs/reference/protocols.md (WS settings) — keep this
     # dict and that doc in lockstep.
     return {
         "type": "settings",
