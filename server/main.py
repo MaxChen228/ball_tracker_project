@@ -79,7 +79,7 @@ from chirp import chirp_wav_bytes
 from preview import FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S  # noqa: F401
 from calibration_solver import PLATE_MARKER_WORLD
 from cleanup_old_sessions import cleanup_expired_sessions
-from sse import SSEHub
+from sse import SSEHub, format_sse
 from ws import DeviceSocketManager
 
 # State, constants, and helper types now live in state.py.
@@ -178,6 +178,7 @@ from routes import calibration_intrinsics as _calibration_intrinsics_routes
 from routes import device_ws as _device_ws_routes
 from routes import presets as _presets_routes
 from routes import algorithms as _algorithms_routes
+from routes import sim_events as _sim_events_routes
 app.include_router(_markers_routes.router)
 app.include_router(_settings_routes.router)
 app.include_router(_camera_routes.router)
@@ -190,6 +191,7 @@ app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
 app.include_router(_presets_routes.router)
 app.include_router(_algorithms_routes.router)
+app.include_router(_sim_events_routes.router)
 
 # Re-exports for routes/* late-bind imports — defined in routes/pitch.py but
 # accessed via `from main import _run_server_detection` etc.
@@ -596,8 +598,8 @@ def status() -> dict[str, Any]:
 async def stream() -> StreamingResponse:
     async def event_gen():
         yield "event: hello\ndata: {}\n\n"
-        async for payload in sse_hub.subscribe():
-            yield payload
+        async for event, data in sse_hub.subscribe():
+            yield format_sse(event, data)
 
     return StreamingResponse(
         event_gen(),

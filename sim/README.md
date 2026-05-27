@@ -11,7 +11,13 @@ ball_tracker 的 **3D 軌跡視覺化端**。職責單一：把 server 算好的
 
 ```
 ball_tracker server (ball_tracker_project/server)
-   GET /sessions/{sid}/trajectory?algorithm={algo}
+   │
+   ├─ WS  /sim/events          ← (1) push 通知：剛錄完的 live session
+   │                             {type:"session_trajectory_ready",
+   │                              session_id, algorithm_id, cause}
+   │
+   └─ GET /sessions/{sid}/trajectory?algorithm={algo}
+                               ← (2) actual data pull，single source of truth
        ↓ HTTP JSON, server world frame, segments only
 sim/TrajectoryViewer.cs
        ↓ 反向座標轉換 (server world → Godot Y-up)
@@ -19,8 +25,17 @@ sim/TrajectoryViewer.cs
 Godot 3D 場景
 ```
 
+兩種觸發來源都收斂到同一條 Load 路徑：
+
+* **Push** — Godot `_Ready` 時連上 `/sim/events` WS。當你停掉一場 live
+  session、`state.results[sid]` 拿到 `ios_capture_time` segments，server
+  fan-out 一則通知，Godot 自動 fetch 並 render。
+* **Pull** — UI 輸入框打 session id → Load 按鈕 → 同一條 fetch path。
+
 **沒有 UDP、沒有中介 process、沒有 raw points 過線。** raw 三角化點留在
-`/results/{sid}` 給 dashboard 畫散佈，本 viewer 只吃擬合結果。
+`/results/{sid}` 給 dashboard 畫散佈，本 viewer 只吃擬合結果。WS 訊息也只
+有通知（type + session_id + algorithm_id + cause），actual JSON 永遠走 GET，
+schema single source of truth。
 
 ## Wire schema
 

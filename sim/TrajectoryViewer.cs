@@ -48,7 +48,14 @@ public partial class TrajectoryViewer : Node3D
     private MeshInstance3D _ball;
     private LineEdit _sessionInput;
     private Label _statusLabel;
-    private OrientationMaterial3D _polylineMat;  // placeholder, see _Ready
+
+    // Push channel — server pings us when a live session just finished
+    // with non-empty segments. We treat the WS as a tap on the shoulder
+    // and pull the actual trajectory via the same HTTP GET the manual
+    // Load button uses.
+    private WebSocketPeer _ws;
+    private bool _wsConnected;
+    private float _wsRetryDelay;     // simple linear back-off, capped
 
     private readonly List<SegmentFit> _segments = new();
     private float _tGlobalStart;
@@ -126,10 +133,18 @@ public partial class TrajectoryViewer : Node3D
             _sessionInput.Text = DefaultSessionId;
         if (loadBtn != null) loadBtn.Pressed += OnLoadPressed;
         if (playBtn != null) playBtn.Pressed += OnPlayPressed;
+
+        // Open the push channel. Failure is non-fatal — manual Load
+        // still works. We retry inside _Process() so a server that
+        // starts after the viewer recovers without an editor restart.
+        _ws = new WebSocketPeer();
+        TryConnectWebSocket();
     }
 
     public override void _Process(double delta)
     {
+        PumpWebSocket((float)delta);
+
         if (!_playing || _segments.Count == 0) return;
         _playTau += (float)delta * PlaybackSpeed;
         if (_playTau > _tGlobalEnd)
@@ -161,8 +176,17 @@ public partial class TrajectoryViewer : Node3D
         if (_sessionInput == null) { SetStatus("[bootstrap] no SessionInput node"); return; }
         var sid = _sessionInput.Text.Trim();
         if (string.IsNullOrEmpty(sid)) { SetStatus("enter session id (s_xxx)"); return; }
-        var url = $"{ServerBaseUrl}/sessions/{sid}/trajectory?algorithm={DefaultAlgorithmId}";
-        SetStatus($"GET {url}");
+        LoadSession(sid, DefaultAlgorithmId, "manual");
+    }
+
+    // Single load path — both the manual button and the WS push handler
+    // funnel through here. Keep this the only place that calls
+    // _http.Request() so the HTTP wire schema lives in one site.
+    private void LoadSession(string sid, string algorithmId, string source)
+    {
+        if (_sessionInput != null) _sessionInput.Text = sid;
+        var url = $"{ServerBaseUrl}/sessions/{sid}/trajectory?algorithm={algorithmId}";
+        SetStatus($"[{source}] GET {url}");
         _http.CancelRequest();
         var err = _http.Request(url);
         if (err != Error.Ok) SetStatus($"http error: {err}");
@@ -262,5 +286,110 @@ public partial class TrajectoryViewer : Node3D
     {
         GD.Print($"[TrajectoryViewer] {msg}");
         if (_statusLabel != null) _statusLabel.Text = msg;
+    }
+
+    // ----- WebSocket push channel -----
+
+    private string WsUrl()
+    {
+        // ServerBaseUrl is "http(s)://host:port". Translate scheme,
+        // append /sim/events.
+        string scheme;
+        string rest;
+        if (ServerBaseUrl.StartsWith("https://"))
+        {
+            scheme = "wss://";
+            rest = ServerBaseUrl.Substring("https://".Length);
+        }
+        else if (ServerBaseUrl.StartsWith("http://"))
+        {
+            scheme = "ws://";
+            rest = ServerBaseUrl.Substring("http://".Length);
+        }
+        else
+        {
+            scheme = "ws://";
+            rest = ServerBaseUrl;
+        }
+        return $"{scheme}{rest}/sim/events";
+    }
+
+    private void TryConnectWebSocket()
+    {
+        var url = WsUrl();
+        GD.Print($"[TrajectoryViewer] WS connect → {url}");
+        var err = _ws.ConnectToUrl(url);
+        if (err != Error.Ok)
+        {
+            GD.PrintErr($"[TrajectoryViewer] WS connect error: {err}");
+        }
+        _wsConnected = false;
+        _wsRetryDelay = 0f;
+    }
+
+    private void PumpWebSocket(float delta)
+    {
+        if (_ws == null) return;
+        _ws.Poll();
+
+        var rs = _ws.GetReadyState();
+        switch (rs)
+        {
+            case WebSocketPeer.State.Open:
+                if (!_wsConnected)
+                {
+                    _wsConnected = true;
+                    GD.Print("[TrajectoryViewer] WS open");
+                }
+                while (_ws.GetAvailablePacketCount() > 0)
+                {
+                    var bytes = _ws.GetPacket();
+                    var text = System.Text.Encoding.UTF8.GetString(bytes);
+                    HandleWsMessage(text);
+                }
+                break;
+            case WebSocketPeer.State.Closed:
+                if (_wsConnected || _wsRetryDelay <= 0f)
+                {
+                    _wsConnected = false;
+                    GD.Print("[TrajectoryViewer] WS closed; will retry");
+                    _wsRetryDelay = 3.0f;  // seconds
+                }
+                _wsRetryDelay -= delta;
+                if (_wsRetryDelay <= 0f) TryConnectWebSocket();
+                break;
+            // Connecting / Closing: just keep polling.
+        }
+    }
+
+    private void HandleWsMessage(string text)
+    {
+        var parsed = Json.ParseString(text);
+        if (parsed.VariantType != Variant.Type.Dictionary) return;
+        var msg = parsed.AsGodotDictionary();
+        if (!msg.ContainsKey("type")) return;
+        var t = (string)msg["type"];
+        switch (t)
+        {
+            case "hello":
+                // Connection ack — no action.
+                break;
+            case "session_trajectory_ready":
+                var sid = (string)msg.GetValueOrDefault("session_id", "");
+                var algo = (string)msg.GetValueOrDefault("algorithm_id", DefaultAlgorithmId);
+                var cause = (string)msg.GetValueOrDefault("cause", "push");
+                if (string.IsNullOrEmpty(sid))
+                {
+                    GD.PrintErr("[TrajectoryViewer] push missing session_id");
+                    return;
+                }
+                LoadSession(sid, algo, $"push:{cause}");
+                break;
+            default:
+                // Tolerate unknown message types so the server can add
+                // events without lock-stepping the Godot client.
+                GD.Print($"[TrajectoryViewer] unknown WS msg type={t}");
+                break;
+        }
     }
 }
