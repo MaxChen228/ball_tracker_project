@@ -355,7 +355,7 @@ class SessionProcessingState:
         only show a chip when the operator has actually done something
         (queued/processing/canceled). A session sitting with a MOV but
         no triggered job is the *default* state and shows nothing — the
-        "Run srv" action button is the affordance.
+        viewer's "Rerun server" button is the affordance.
         """
         job_states = [
             self.server_post_jobs.get(key)

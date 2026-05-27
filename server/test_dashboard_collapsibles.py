@@ -124,21 +124,17 @@ def test_events_card_renders_hybrid_snapshot_without_keyerror():
     assert "tennis" in html  # live chip
 
 
-def test_run_srv_form_has_no_return_to_field():
-    """The dashboard events-row Run srv form intentionally omits the
-    `return_to` hidden field so `_resolve_return_to` falls back to `/`
-    (the page the operator is already on). A regression that copy-
-    pasted `<input name="return_to" value="/viewer/{sid}">` here
-    would silently dump the dashboard caller into the viewer mid-rerun,
-    breaking the per-caller redirect contract that phase 1 introduced."""
+def test_dashboard_chip_has_no_run_srv_form():
+    """The dashboard events-row deliberately does NOT render the
+    `Run srv` form — rerunning server detection is a viewer-level
+    decision (operator needs to see the trajectory before picking a
+    preset). The viewer page keeps its own form. If a chip-strip
+    regression re-adds it, this guard catches it."""
     e = {
         "session_id": "s_form", "created_day": "2026-05-04", "created_hm": "10:00",
         "live_config_used": _snapshot_v11(),
         "server_post_config_used": _snapshot_v11(),
     }
     html = _render_events_body([e])
-    form_anchor = 'action="/sessions/s_form/run_server_post"'
-    assert form_anchor in html
-    start = html.index(form_anchor)
-    form_chunk = html[start:html.index("</form>", start) + len("</form>")]
-    assert 'name="return_to"' not in form_chunk
+    assert "/sessions/s_form/run_server_post" not in html
+    assert "Run srv" not in html
