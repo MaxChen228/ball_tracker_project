@@ -162,9 +162,6 @@ _CSS = f"""
                         text-transform: uppercase; color: var(--sub); margin-right: 6px; }}
 .sidebar .arm-error {{ margin-top: 6px; font-size: 11px; line-height: 1.45;
                        color: var(--danger, #B14343); font-family: var(--mono); }}
-.sidebar .paths-stack {{ gap: 10px; margin-top: 12px; }}
-.sidebar .path-option {{ padding: 6px 8px; }}
-.sidebar .paths-actions {{ margin-top: 10px; }}
 .hsv-form {{ display: flex; flex-direction: column; gap: var(--s-3); }}
 .hsv-presets {{ display: flex; gap: var(--s-2); flex-wrap: wrap; }}
 .hsv-grid {{ display: flex; flex-direction: column; gap: var(--s-2); }}
