@@ -153,9 +153,10 @@ class LivePairingSession:
         frames within `window_s`.
 
         `anchors` — `{cam_id: sync_anchor_timestamp_s_or_None}`. Defaults
-        to module-level `NO_ANCHORS` (both cams None) so test fixtures
-        and pre-arm callers don't accidentally trip the silent
-        `(anchors or {})` fallback removed in the audit. The cross-cam
+        to module-level `NO_ANCHORS` (empty dict — `anchors.get(cam)`
+        returns None for any unknown cam, no silent KeyError) so test
+        fixtures and pre-arm callers don't accidentally trip the
+        `(anchors or {})` fallback pattern. The cross-cam
         window check uses anchor-relative time (`frame.timestamp_s −
         anchors[cam]`) when both entries are non-None. Required for the
         anchor-relative path because each camera reports its own

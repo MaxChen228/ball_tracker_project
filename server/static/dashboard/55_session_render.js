@@ -207,11 +207,15 @@
       // quick chirp button
       if (dom.syncBtn.disabled !== armed) dom.syncBtn.disabled = armed;
       // sync LEDs — iterate over the rig's configured cameras so a
-      // third camera grows the LED strip without code changes.
+      // third camera grows the LED strip without code changes. LED
+      // DOM is built from EXPECTED above, so a missing entry is a
+      // template bug; loud-fail instead of silent-skipping.
       for (const cam of EXPECTED) {
         const led = dom.leds[cam];
         const ageEl = dom.ages[cam];
-        if (!led) continue;
+        if (!led) {
+          throw new Error(`session_render: missing sync-led DOM for cam=${cam}`);
+        }
         const { cls, tip, ageText } = syncLedState(state, cam);
         const klass = 'sync-led ' + cls;
         if (led.className !== klass) led.className = klass;

@@ -75,6 +75,17 @@ logger = logging.getLogger("ball_tracker")
 _DEFAULT_DATA_DIR = Path(os.environ.get("BALL_TRACKER_DATA_DIR", "data"))
 
 
+# Rig configuration constant: the camera roles every deployment
+# ships with at minimum. `State.expected_camera_ids()` unions this
+# with the device registry + calibration store keys, so an A-only
+# cold boot still renders B's slot as "offline" and a future
+# third-camera registration grows the set automatically. To
+# permanently add a fourth role to the rig, edit this constant and
+# ship — it is NOT a silent fallback. See `expected_camera_ids`
+# docstring for the IDs naming convention.
+_RIG_BASELINE_CAMERAS: frozenset[str] = frozenset({"A", "B"})
+
+
 # Seconds a heartbeat remains fresh. A phone beating at 1 Hz drops off the
 # "online" list after missing ~3 beats — conservative enough to tolerate a
 # stalled wifi roam without flapping.
@@ -1466,11 +1477,20 @@ class State:
         `window.__EXPECTED_CAMS__`) and every server-side render helper
         that iterated `("A","B")` literals pre-N-camera refactor.
 
-        Today's rig configuration is hard-baked at A + B (the canonical
-        pair). The union with `known_camera_ids` / calibration store
-        keys means a future third camera that registers via heartbeat
-        or auto-cal grows the set automatically — the operator does
-        not need to redeploy the server.
+        Returns the union of:
+          - `_RIG_BASELINE_CAMERAS` (`{"A","B"}` — the static rig
+            configuration: every shipped deployment has at minimum
+            this pair, and an A-only / B-only cold-boot still renders
+            its peer slot as "offline" rather than disappearing).
+          - Cameras the device registry has ever heartbeated this run.
+          - Cameras with persisted calibration on disk.
+
+        The baseline is NOT a silent fallback — it is a rig
+        configuration constant. Adding a third camera permanently to
+        the rig means editing `_RIG_BASELINE_CAMERAS` and shipping.
+        IDs should be uppercase single-letter or short alphanumeric
+        ("A","B","C","X1",...); mixed-case ordering is ASCII-sorted
+        (uppercase < lowercase) and operator-defined.
 
         Downstream code MUST iterate over this list, never literal A/B
         tuples — that is the contract that lets N-camera support land
@@ -1478,11 +1498,7 @@ class State:
         with self._lock:
             known = set(self._device_registry.known_camera_ids())
             cal = set(self._calibration_store.snapshot().keys())
-        # A + B is the static rig baseline. Even when only A has
-        # heartbeated and B has never connected, B's slot should still
-        # render so the operator sees "B: offline" rather than the
-        # slot disappearing.
-        return sorted(known | cal | {"A", "B"})
+        return sorted(known | cal | _RIG_BASELINE_CAMERAS)
 
     def device_snapshot(self, camera_id: str) -> Device | None:
         with self._lock:

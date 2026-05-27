@@ -76,7 +76,13 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
         "live": {"total": 0, "detected": 0, "fps": None},
         "server_post": {"total": 0, "detected": 0, "fps": None},
     }
-    for cam_id in ("A", "B"):
+    # Union of (rig expected cameras) ∪ (cameras that actually delivered
+    # a pitch for this session) — so a session ingested from a 3-cam rig
+    # surfaces every cam slot, AND a legacy 2-cam session's slots still
+    # render even after the rig grows. expected_camera_ids() already
+    # contains the {"A","B"} baseline plus any registered third cam.
+    session_cam_ids = sorted(set(state.expected_camera_ids()) | set(pitches.keys()))
+    for cam_id in session_cam_ids:
         p = pitches.get(cam_id)
         if p is None:
             cams[cam_id] = {
