@@ -433,8 +433,9 @@ async def sessions_run_server_post(
 ):
     """[Deprecation alias] Prefer `POST /sessions/{sid}/runs/{algorithm_id}`.
 
-    Kept for HTML form callers (events-row "Run srv" button + viewer
-    "Rerun server" button), which submit `preset_name` only. The
+    Kept for the viewer "Rerun server" HTML form, which submits
+    `preset_name` only. (Dashboard chip strip no longer renders a Run
+    srv form — rerun is a viewer-level decision.) The
     snapshot's `algorithm_id` is derived from the preset, then routed
     through the same `_dispatch_server_post` as the new endpoint.
 

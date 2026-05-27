@@ -188,8 +188,6 @@
     const actBits = [];
     if (e.processing_state === 'queued' || e.processing_state === 'processing') {
       actBits.push(_formBtn(`/sessions/${sid}/cancel_processing`, 'Cancel', 'warn'));
-    } else if (!trashed && srvStatus !== 'done') {
-      actBits.push(_runSrvForm(sid));
     }
     if (trashed) {
       actBits.push(_formBtn(`/sessions/${sid}/restore`, 'Restore', 'ok'));
@@ -217,22 +215,15 @@
       ${actionsHtml}`;
   }
 
-  // Module-scope preset cache. Initialised on boot via _refreshPresetsCache;
-  // refreshed on every events tick start so a freshly-saved preset surfaces
-  // in the Run-srv dropdown without a page reload (the SSR path picks it
-  // up automatically; this keeps the JS-rendered rows in sync). The
-  // /presets endpoint is dirt-cheap (a single os.listdir + N file reads;
-  // every render path already calls it on each render).
+  // Module-scope preset cache for the cfg-strip chip's label lookup
+  // (`Live blue_ball` shows the human-readable label, not just the slug).
+  // Refreshed on every events tick so a freshly-saved preset's label
+  // surfaces without a page reload. /presets is dirt-cheap.
   let _presetsCache = [];
-  let _activePresetCache = null;
   async function _refreshPresetsCache() {
     try {
-      const [pr, st] = await Promise.all([
-        fetch('/presets', { cache: 'no-store' }),
-        fetch('/status', { cache: 'no-store' }),
-      ]);
+      const pr = await fetch('/presets', { cache: 'no-store' });
       if (pr.ok) _presetsCache = (await pr.json()).presets || [];
-      if (st.ok) _activePresetCache = (await st.json()).active_preset_name || null;
     } catch (_) { /* silent — renderer falls back gracefully on empty cache */ }
   }
   if (typeof window !== 'undefined') {
@@ -280,19 +271,6 @@
       return `<span class="ev-cfg-chip" title="${esc(p.label)} — ${esc(cfgTip)}">${esc(label)} <b>${esc(name)}</b></span>`;
     };
     return `<div class="ev-cfg-strip">${chip('Live', liveCfg)}${chip('Svr', srvCfg)}</div>`;
-  }
-
-  function _runSrvForm(sid) {
-    const opts = _presetsCache.map(p => {
-      const sel = (p.name === _activePresetCache) ? ' selected' : '';
-      return `<option value="${esc(p.name)}"${sel}>${esc(p.label)} (${esc(p.name)})</option>`;
-    }).join('');
-    return (
-      `<form class="ev-action-form" method="POST" action="/sessions/${sid}/run_server_post">` +
-      `<select class="ev-cfg-select" name="preset_name" title="Detection preset to run server-side">${opts}</select>` +
-      `<button class="ev-btn ok" type="submit">Run srv</button>` +
-      `</form>`
-    );
   }
 
   function _formBtn(action, label, variant, confirm, title) {

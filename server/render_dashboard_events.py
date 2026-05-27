@@ -4,7 +4,7 @@ Card structure (3 visual rows max, row 2/3 collapse when empty):
 
   row1: [swatch] HH:MM  s_xxxxxxxx                       [status chips]
   row2: [L|252·157] [S|0·0] [G|✓·—]   ·   65 pts · 1.40 s · 1.65 m · 28 mph
-  row3:                                          [Run srv] [Trash] [...]
+  row3:                                                    [Trash] [...]
 
 DOM root keeps `.event-item` + `data-sid` because `86_live_stream.js`
 selects on it for the flash-done SSE animation, and `40_traj_handlers.js`
@@ -298,14 +298,6 @@ def _actions_html(e: dict[str, Any], sid: str,
     server_status = path_status.get("server_post") or "-"
     if processing_state in {"queued", "processing"}:
         parts.append(_form_btn(f"/sessions/{sid}/cancel_processing", "Cancel", "warn"))
-    elif not trashed and server_status != "done":
-        # Operator picks the preset to detect under via the inline
-        # <select>. Default selection = current dashboard active preset
-        # (usually what the operator just dialled in via Apply on the
-        # HSV card); they can pick any other named preset to compare
-        # detection results. Re-running overwrites the prior result.
-        parts.append(_run_srv_form(sid))
-
     if trashed:
         parts.append(_form_btn(
             f"/sessions/{sid}/restore", "Restore", "ok",
@@ -321,36 +313,6 @@ def _actions_html(e: dict[str, Any], sid: str,
         ))
 
     return "".join(parts)
-
-
-def _run_srv_form(sid: str) -> str:
-    """`Run srv` button with inline preset selector. Default option is
-    the sticky server_post preset (`state.active_server_post_preset_name`)
-    — distinct from the live-detection active preset
-    (`detection_config().preset`) because server_post is the operator's
-    rerun choice for offline detection, not the iOS live config.
-    Operator can pick any on-disk preset to detect under. Submits as
-    application/x-www-form-urlencoded with `preset_name` field only to
-    the deprecation-alias endpoint `/sessions/{sid}/run_server_post`;
-    the server derives `algorithm_id` from the preset (canonical), so
-    the form never disagrees with what runs."""
-    from main import state as _state
-
-    active = _state.active_server_post_preset_name()
-    options = "".join(
-        f'<option value="{html.escape(p.name)}"'
-        f'{" selected" if p.name == active else ""}>'
-        f'{html.escape(p.label)} ({html.escape(p.name)} · {html.escape(p.algorithm_id)})</option>'
-        for p in _state.list_presets()
-    )
-    return (
-        f'<form class="ev-action-form" method="POST" '
-        f'action="/sessions/{sid}/run_server_post">'
-        f'<select class="ev-cfg-select" name="preset_name" '
-        f'title="Detection preset to run server-side (algorithm derived from preset)">{options}</select>'
-        f'<button class="ev-btn ok" type="submit">Run srv</button>'
-        f'</form>'
-    )
 
 
 def _form_btn(action: str, label: str, variant: str,
