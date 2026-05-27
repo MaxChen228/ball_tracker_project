@@ -80,17 +80,20 @@ def _mutual_math(last_sync: dict[str, Any]) -> dict[str, Any] | None:
     derivation of the same d from within-clock deltas). A large value
     means the server picked the wrong bursts for α or β.
     """
-    def _f(key: str) -> float | None:
-        v = last_sync.get(key)
+    def _f(role: str, key: str) -> float | None:
+        # times_by_role keys are camera_ids; today the rig still uses
+        # "A" / "B" but the dict shape is forward-compat.
+        entry = (last_sync.get("times_by_role") or {}).get(role) or {}
+        v = entry.get(key)
         try:
             return float(v) if v is not None else None
         except (TypeError, ValueError):
             return None
 
-    t_self_a = _f("t_a_self_s")
-    t_other_a = _f("t_a_from_b_s")
-    t_self_b = _f("t_b_self_s")
-    t_other_b = _f("t_b_from_a_s")
+    t_self_a = _f("A", "t_self_s")
+    t_other_a = _f("A", "t_from_other_s")
+    t_self_b = _f("B", "t_self_s")
+    t_other_b = _f("B", "t_from_other_s")
     if None in (t_self_a, t_other_a, t_self_b, t_other_b):
         return None
 

@@ -70,10 +70,10 @@ def test_known_offset_and_distance_roundtrip() -> None:
     assert result.delta_s == pytest.approx(delta, abs=1e-9)
     assert result.distance_m == pytest.approx(distance, abs=1e-6)
     # Raw timestamps preserved so the viewer can render the exchange later.
-    assert result.t_a_self_s == a.t_self_s
-    assert result.t_b_self_s == b.t_self_s
-    assert result.t_a_from_b_s == a.t_from_other_s
-    assert result.t_b_from_a_s == b.t_from_other_s
+    assert result.times_by_role["A"].t_self_s == a.t_self_s
+    assert result.times_by_role["B"].t_self_s == b.t_self_s
+    assert result.times_by_role["A"].t_from_other_s == a.t_from_other_s
+    assert result.times_by_role["B"].t_from_other_s == b.t_from_other_s
     assert result.id == SYNC_ID
     assert result.solved_at == 42.0
 

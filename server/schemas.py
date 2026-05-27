@@ -801,40 +801,56 @@ class SyncReport(BaseModel):
     abort_reason: str | None = None
 
 
+class RoleSyncTimes(BaseModel):
+    """Timestamps one role contributed to a mutual-sync run. Both fields
+    can be null on aborted runs where that phone never heard the
+    corresponding chirp."""
+    model_config = ConfigDict(extra="forbid")
+    # mic PTS when the role's own phone heard its own chirp.
+    t_self_s: float | None = None
+    # mic PTS when the role's own phone heard the peer's chirp.
+    t_from_other_s: float | None = None
+
+
+class RoleSyncTraces(BaseModel):
+    """Matched-filter traces one role observed (own chirp echo + peer
+    chirp arrival), copied off the incoming SyncReport so the /sync
+    page can render the full peak timeline post-hoc."""
+    model_config = ConfigDict(extra="forbid")
+    self_trace: list[SyncTraceSample] | None = None
+    other_trace: list[SyncTraceSample] | None = None
+
+
 class SyncResult(BaseModel):
     """Outcome of one mutual-sync run — solved OR aborted. `delta_s` is
     **A clock minus B clock** (a positive value means A is ahead of B).
     Apply it as `t_on_A = t_on_B + delta_s` when re-timing B's events into
     A's timeline.
 
-    When `aborted=True`, `delta_s` / `distance_m` / raw timestamps are
-    None and the row is a diagnostic carrier: the traces + `abort_reasons`
-    map still describe what each phone heard (and didn't), so a post-hoc
-    dashboard / log reader can see sub-threshold peaks and noise floor."""
+    When `aborted=True`, `delta_s` / `distance_m` / per-role timestamps
+    inside `times_by_role` are None and the row is a diagnostic carrier:
+    `traces_by_role` + `abort_reasons` still describe what each phone
+    heard (and didn't), so a post-hoc dashboard / log reader can see
+    sub-threshold peaks and noise floor."""
     id: str
     delta_s: float | None = None
     distance_m: float | None = None
     solved_at: float
-    # Raw timestamps preserved for post-hoc debugging / viewer overlays.
-    # Null on aborted runs where that phone never heard the corresponding
-    # chirp.
-    t_a_self_s: float | None = None
-    t_a_from_b_s: float | None = None
-    t_b_self_s: float | None = None
-    t_b_from_a_s: float | None = None
-    # Failure-mode fields. `aborted=True` when at least one of the two
-    # phones couldn't produce a full timestamp pair. `abort_reasons` maps
-    # role → reason string ("timeout", "dismissed", "disarmed", ...).
+    # camera_id → RoleSyncTimes. Mutual sync today is pair-wise (A↔B);
+    # the dict shape is forward-compat for N-camera sync topologies
+    # (broadcast / star) where every participating role contributes a
+    # pair of timestamps. Missing role entry = that phone never reported.
+    times_by_role: dict[str, RoleSyncTimes] = Field(default_factory=dict)
+    # Failure-mode fields. `aborted=True` when at least one of the
+    # participating phones couldn't produce a full timestamp pair.
+    # `abort_reasons` maps role → reason string ("timeout", "dismissed",
+    # "disarmed", ...).
     aborted: bool = False
     abort_reasons: dict[str, str] = Field(default_factory=dict)
-    # Per-role matched-filter traces copied off the incoming SyncReports so
-    # the /sync page can render the full peak timeline post-hoc (page
-    # reload, or inspecting a past run). Optional: old iOS builds ship
-    # reports without traces.
-    trace_a_self: list[SyncTraceSample] | None = None
-    trace_a_other: list[SyncTraceSample] | None = None
-    trace_b_self: list[SyncTraceSample] | None = None
-    trace_b_other: list[SyncTraceSample] | None = None
+    # camera_id → RoleSyncTraces. Same dict shape rationale as
+    # `times_by_role`. Old iOS builds that don't collect traces simply
+    # omit the role's trace entries (the inner fields default to None).
+    traces_by_role: dict[str, RoleSyncTraces] = Field(default_factory=dict)
 
 
 class SyncLogEntry(BaseModel):
