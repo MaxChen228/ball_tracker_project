@@ -24,7 +24,6 @@ _SYNC_CSS = """
   font-family: var(--mono); font-size: 28px; line-height: 1.05; letter-spacing: 0.02em;
   color: var(--ink); margin: 0;
 }
-.page-copy { color: var(--ink-light); max-width: 720px; }
 .setup-section-title {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
   text-transform: uppercase; color: var(--sub);
@@ -49,13 +48,6 @@ _SYNC_CSS = """
 }
 .camera-compare-grid {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
-}
-.compare-cell-label {
-  position: absolute; left: 12px; top: 12px; z-index: 3;
-  padding: 4px 8px; border: 1px solid rgba(255,255,255,0.2);
-  background: rgba(0,0,0,0.55); color: rgba(255,255,255,0.85);
-  font-family: var(--mono); font-size: 10px;
-  letter-spacing: 0.12em; text-transform: uppercase;
 }
 .devices-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
                  gap: var(--s-3); }

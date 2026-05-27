@@ -62,15 +62,6 @@ class CalibrationSolveResult:
     image_height_px: int
 
 
-def detect_plate_markers(bgr_image: np.ndarray) -> list[DetectedMarker]:
-    """Run ArUco (DICT_4X4_50) detection on a BGR image and return only
-    markers with IDs in the plate-landmark set (0-8). Extra / unknown IDs
-    are silently dropped so a stray marker in the background can't poison
-    the homography solve."""
-    return [m for m in detect_all_markers_in_dict(bgr_image)
-            if m.id in PLATE_MARKER_WORLD]
-
-
 def detect_all_markers_in_dict(bgr_image: np.ndarray) -> list[DetectedMarker]:
     """Run ArUco (DICT_4X4_50) detection and return every detected marker
     (IDs 0-49). Used by Phase 5's extended-markers registration + the
@@ -152,8 +143,7 @@ def solve_homography_from_world_map(
     arbitrary `world_map` (plate markers ∪ extended markers). Needs ≥5 of
     the detected markers to appear as keys in `world_map`; returns None
     otherwise. Detected markers whose IDs are absent from `world_map` are
-    silently dropped (same policy as `detect_plate_markers` → unknown IDs
-    can't poison the solve).
+    silently dropped (unknown IDs are not plate landmarks → safe to skip).
 
     `missing_ids` in the result is always relative to the plate-landmark
     set (IDs 0-8) so dashboards keep a stable "which plate marker did we

@@ -766,8 +766,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         statusPresenter = CameraStatusPresenter(
             topStatusChip: overlayView.topStatusChip,
             warningLabel: overlayView.warningLabel,
-            connectionLabel: overlayView.connectionLabel,
-            previewLabel: overlayView.previewLabel,
             stateBorderLayer: overlayView.stateBorderLayer
         )
         syncInlineControlsFromSettings()
@@ -810,14 +808,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
     private func updateUIForState() {
         let reachable = healthMonitor?.isReachable ?? false
         let connectionText = "LINK · \((healthMonitor?.statusText ?? "offline").uppercased())"
-        let previewState = transportCoordinator.isPreviewRequested ? "REMOTE ON" : (captureRuntime.isSessionRunning ? "LOCAL ACTIVE" : "OFF")
         overlayView.syncConnection(reachable: reachable)
         overlayView.syncStatus(connectionText)
-        statusPresenter.render(
-            state: state,
-            connectionText: connectionText,
-            previewText: "PREVIEW · \(previewState)"
-        ) { [weak self] isRecording in
+        statusPresenter.render(state: state) { [weak self] isRecording in
             self?.overlayView.setRecordingActive(isRecording)
         }
     }

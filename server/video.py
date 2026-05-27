@@ -73,19 +73,6 @@ def probe_dims(video_path: Path) -> tuple[int, int] | None:
         container.close()
 
 
-def count_frames(video_path: Path) -> int:
-    """Cheap second-pass frame count (used by tests / sanity logs)."""
-    container = av.open(str(video_path))
-    try:
-        stream = container.streams.video[0]
-        n = 0
-        for _ in container.decode(stream):
-            n += 1
-        return n
-    finally:
-        container.close()
-
-
 def probe_frame_count(video_path: Path) -> int | None:
     """Estimate frame count from container metadata without decoding any
     samples — used to seed UX progress bars where ±1-2 frames of error is
@@ -93,8 +80,7 @@ def probe_frame_count(video_path: Path) -> int | None:
     on some MOV variants); callers should fall back to indeterminate
     progress in that case.
 
-    Cheap: opens the container, reads stream headers, closes. Avoid
-    `count_frames` for this — it's a full second decode pass."""
+    Cheap: opens the container, reads stream headers, closes."""
     try:
         container = av.open(str(video_path))
     except Exception as e:

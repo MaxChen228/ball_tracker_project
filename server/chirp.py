@@ -32,16 +32,6 @@ SYNC_BAND_A_F1: float = 4000.0
 SYNC_BAND_B_F0: float = 5000.0
 SYNC_BAND_B_F1: float = 7000.0
 SYNC_CHIRP_DURATION_S: float = 0.1
-SYNC_SAMPLE_RATE: int = 48000  # matches iOS AVCaptureAudioDataOutput native rate
-
-
-def sync_chirp_band(role: str) -> tuple[float, float]:
-    """Return (f0, f1) for the given role's mutual-sync emission band."""
-    if role == "A":
-        return SYNC_BAND_A_F0, SYNC_BAND_A_F1
-    if role == "B":
-        return SYNC_BAND_B_F0, SYNC_BAND_B_F1
-    raise ValueError(f"unknown sync role {role!r} — expected 'A' or 'B'")
 
 
 def _hann_chirp(sample_rate: int, f0: float, f1: float, duration: float) -> np.ndarray:

@@ -1,5 +1,4 @@
 import Foundation
-import UIKit
 import os
 
 private let syncLog = Logger(subsystem: "com.Max0228.ball-tracker", category: "camera.sync")

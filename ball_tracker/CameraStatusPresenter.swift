@@ -11,8 +11,6 @@ final class CameraStatusPresenter {
 
     private weak var topStatusChip: StatusChip?
     private weak var warningLabel: UILabel?
-    private weak var connectionLabel: UILabel?
-    private weak var previewLabel: UILabel?
     private weak var stateBorderLayer: CAShapeLayer?
 
     private var lastRenderedState: CameraViewController.AppState?
@@ -20,26 +18,17 @@ final class CameraStatusPresenter {
     init(
         topStatusChip: StatusChip,
         warningLabel: UILabel,
-        connectionLabel: UILabel,
-        previewLabel: UILabel,
         stateBorderLayer: CAShapeLayer
     ) {
         self.topStatusChip = topStatusChip
         self.warningLabel = warningLabel
-        self.connectionLabel = connectionLabel
-        self.previewLabel = previewLabel
         self.stateBorderLayer = stateBorderLayer
     }
 
     func render(
         state: CameraViewController.AppState,
-        connectionText: String,
-        previewText: String,
         onRecordingChanged: (_ isRecording: Bool) -> Void
     ) {
-        connectionLabel?.text = connectionText
-        previewLabel?.text = previewText
-
         guard lastRenderedState != state else { return }
         lastRenderedState = state
 

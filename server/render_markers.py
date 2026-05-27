@@ -112,10 +112,6 @@ _MARKERS_CSS = """
   flex-direction: row; align-items: center; gap: 8px; padding-top: 23px;
 }
 .field.checkbox label { margin: 0; }
-.muted-note {
-  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
-  color: var(--sub); text-transform: uppercase;
-}
 #markers-plot {
   width: 100%; height: 620px;
   background: var(--surface-hover); border: 1px solid var(--border-l);

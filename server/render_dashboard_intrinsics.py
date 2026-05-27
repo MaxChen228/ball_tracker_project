@@ -175,7 +175,7 @@ def _render_records_list(
     row_lines: list[str] = []
     for rec in records:
         did = str(rec.get("device_id") or "")
-        model = str(rec.get("device_model") or "unknown")
+        model = str(rec.get("device_model") or "")
         fx = rec.get("fx")
         fy = rec.get("fy")
         rms = rec.get("rms_reprojection_px")

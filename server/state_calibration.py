@@ -371,7 +371,7 @@ class AutoCalibrationRun:
             "detail": self.detail,
             "detected_ids": list(self.detected_ids or []),
             "result": dict(self.result or {}),
-            "events": [dict(ev) for ev in (self.events or [])],
+            "events": [dict(ev) for ev in self.events],
         }
 
 

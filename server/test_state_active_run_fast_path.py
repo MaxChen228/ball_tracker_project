@@ -137,12 +137,24 @@ def _build_mono_session(s: main.State, monkeypatch, sid: str) -> None:
 def _eq_modulo_timestamps(
     a: SessionResult, b: SessionResult,
 ) -> tuple[bool, str]:
-    """Deep-equal except for wall-clock fields that depend on call order."""
+    """Deep-equal except for wall-clock fields that depend on call order.
+
+    Set-valued fields (`algorithms_completed: set[str]`) get sorted before
+    compare — pydantic v2 serialises a set to JSON list whose order is
+    governed by Python hash randomisation, so the same content can flip
+    iteration order between two model_dump calls in the same process.
+    The schema-level invariant is "same membership", not "same order".
+    """
     ad = a.model_dump(mode="json")
     bd = b.model_dump(mode="json")
     for k in ("solved_at", "server_post_ran_at"):
         ad.pop(k, None)
         bd.pop(k, None)
+    # Schema-declared set fields: their JSON projection is an unordered
+    # list. Normalise so a true content match isn't masked by hash order.
+    for k in ("algorithms_completed",):
+        if isinstance(ad.get(k), list): ad[k] = sorted(ad[k])
+        if isinstance(bd.get(k), list): bd[k] = sorted(bd[k])
     if ad == bd:
         return True, ""
     diffs: list[str] = []

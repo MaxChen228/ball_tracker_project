@@ -162,9 +162,6 @@ _CSS = f"""
                         text-transform: uppercase; color: var(--sub); margin-right: 6px; }}
 .sidebar .arm-error {{ margin-top: 6px; font-size: 11px; line-height: 1.45;
                        color: var(--danger, #B14343); font-family: var(--mono); }}
-.sidebar .paths-stack {{ gap: 10px; margin-top: 12px; }}
-.sidebar .path-option {{ padding: 6px 8px; }}
-.sidebar .paths-actions {{ margin-top: 10px; }}
 .hsv-form {{ display: flex; flex-direction: column; gap: var(--s-3); }}
 .hsv-presets {{ display: flex; gap: var(--s-2); flex-wrap: wrap; }}
 .hsv-grid {{ display: flex; flex-direction: column; gap: var(--s-2); }}
@@ -176,7 +173,6 @@ _CSS = f"""
 .hsv-pair input[type="range"] {{ width: 100%; margin: 0; accent-color: var(--ink); }}
 .hsv-num {{ width: 100%; min-width: 0; padding: 6px 8px; border: 1px solid var(--border-base); border-radius: var(--r); background: var(--surface); color: var(--ink); font-family: var(--mono); font-size: 11px; }}
 .hsv-actions {{ display: flex; justify-content: flex-end; }}
-.shape-gate-form {{ margin-top: 0; padding-top: 0; border-top: 0; }}
 .tune-section {{ border-top: 1px solid var(--border-l); padding: var(--s-2) 0; }}
 .tune-section:first-of-type {{ border-top: 0; padding-top: 0; }}
 .tune-section > summary {{ cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: baseline;
@@ -185,7 +181,6 @@ _CSS = f"""
 .tune-section > summary::after {{ content: '▸'; color: var(--sub); margin-left: var(--s-2); }}
 .tune-section[open] > summary::after {{ content: '▾'; color: var(--ink); }}
 .tune-section[open] > summary {{ color: var(--ink); }}
-.tune-section .tune-name {{ font-weight: 600; }}
 .tune-section .tune-summary {{ color: var(--sub); font-size: 10px; letter-spacing: 0.04em; text-transform: none; }}
 .tune-section[open] .tune-summary {{ display: none; }}
 .tune-section > .hsv-form {{ margin-top: var(--s-2); }}
@@ -229,40 +224,11 @@ _CSS = f"""
 .shape-row {{ display: grid; grid-template-columns: 60px minmax(0, 1fr) 56px; gap: var(--s-2); align-items: center; }}
 .shape-label {{ font-family: var(--mono); font-size: 11px; letter-spacing: 0.10em; text-transform: uppercase; color: var(--sub); }}
 .shape-row input[type="range"] {{ width: 100%; margin: 0; accent-color: var(--ink); }}
-.active-head {{ display:flex; align-items:center; gap:var(--s-2); margin-bottom:var(--s-2); }}
-.active-grid {{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:var(--s-2); margin-top:var(--s-3); }}
-.active-grid span {{ display:flex; flex-direction:column; gap:2px; padding:6px 8px;
-                      border:1px solid var(--border-l); border-radius:var(--r);
-                      background:rgba(42,37,32,0.02); }}
-.active-grid .k {{ font-family:var(--mono); font-size:10px; letter-spacing:0.10em;
-                   text-transform:uppercase; color:var(--sub); }}
-.active-grid .v {{ font-family:var(--mono); font-size:13px; color:var(--ink); }}
-.active-empty {{ font-family:var(--mono); font-size:11px; letter-spacing:0.08em; color:var(--sub); }}
-.active-head .elapsed {{ margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--sub);
-                         letter-spacing:0.04em; }}
 .chip.armed.pulse {{ animation: rec-pulse 1.4s ease-in-out infinite; }}
 @keyframes rec-pulse {{
   0%, 100% {{ opacity: 1; }}
   50% {{ opacity: 0.45; }}
 }}
-.cam-row {{ display:grid; grid-template-columns: 80px 18px 1fr auto; align-items:center;
-            gap:var(--s-2); padding:6px 8px; margin-top:var(--s-2);
-            border:1px solid var(--border-l); border-radius:var(--r);
-            background:rgba(42,37,32,0.02); }}
-.cam-row .spark {{ width:80px; height:18px; display:block; }}
-.cam-row .k {{ font-family:var(--mono); font-size:11px; color:var(--ink); font-weight:600; }}
-.cam-row .v {{ font-family:var(--mono); font-size:11px; color:var(--ink); }}
-.cam-row .vsub {{ font-family:var(--mono); font-size:10px; color:var(--sub); }}
-.live-pairs {{ display:flex; gap:var(--s-2); align-items:center; padding:6px 8px;
-               margin-top:var(--s-2); border:1px solid var(--border-l);
-               border-radius:var(--r); background:rgba(42,37,32,0.02);
-               transition: background 120ms, border-color 120ms; }}
-.live-pairs .k {{ font-family:var(--mono); font-size:10px; letter-spacing:0.10em;
-                  text-transform:uppercase; color:var(--sub); }}
-.live-pairs .v {{ font-family:var(--mono); font-size:12px; color:var(--ink); }}
-.live-pairs .vsub {{ font-family:var(--mono); font-size:10px; color:var(--sub); margin-left:auto; }}
-.live-pairs.stale {{ border-color:var(--failed); background:var(--failed-bg); }}
-.postpass-row {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:var(--s-2); }}
 .postpass-chip {{ font-family:var(--mono); font-size:10px; letter-spacing:0.04em;
                   padding:2px 6px; border:1px solid var(--border-base);
                   border-radius:var(--r); color:var(--sub); }}
@@ -270,40 +236,6 @@ _CSS = f"""
 .postpass-chip.pending {{ color:var(--sub); }}
 .postpass-chip.running {{ color:var(--ink); border-color:var(--ink); }}
 .postpass-chip.stopped {{ color:var(--sub); border-style:dashed; }}
-.active-actions {{ display:flex; gap:var(--s-2); margin-top:var(--s-3); }}
-.active-actions .btn-stop {{ padding:4px 12px; font:inherit; font-size:11px;
-                              background:var(--failed); color:white; border:none;
-                              border-radius:var(--r); cursor:pointer; }}
-.active-actions .btn-reset {{ padding:4px 12px; font:inherit; font-size:11px;
-                               background:transparent; color:var(--sub);
-                               border:1px solid var(--border-base);
-                               border-radius:var(--r); cursor:pointer; }}
-.active-actions .btn-reset:hover {{ color:var(--ink); border-color:var(--ink); }}
-.mode-row {{ display: flex; gap: var(--s-2); align-items: center; margin-top: var(--s-3);
-             flex-wrap: wrap; }}
-.mode-label {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
-                text-transform: uppercase; color: var(--sub); min-width: 44px; }}
-.mode-locked {{ font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
-                 color: var(--sub); padding-left: var(--s-1); }}
-.paths-stack {{ display:flex; flex-direction:column; gap:var(--s-2); margin-top:var(--s-3); }}
-.path-option {{ display:flex; gap:var(--s-2); align-items:flex-start; padding:8px;
-                border:1px solid var(--border-l); border-radius:var(--r); }}
-.path-option input {{ margin-top:3px; }}
-.path-option .copy {{ display:flex; flex-direction:column; gap:1px; }}
-.path-option .title {{ font-family:var(--mono); font-size:11px; color:var(--ink); letter-spacing:0.06em; }}
-.path-option .sub {{ font-family:var(--sans); font-size:11px; color:var(--sub); line-height:1.5; }}
-.paths-actions {{ margin-top:var(--s-2); }}
-.path-chip-row {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:var(--s-2); }}
-.path-chip {{ display:inline-block; padding:2px 8px; border:1px solid var(--border-base);
-              border-radius:var(--r); font-family:var(--mono); font-size:10px;
-              letter-spacing:0.08em; text-transform:uppercase; color:var(--sub); }}
-.path-chip.on {{ color:var(--passed); border-color:var(--passed); background:var(--passed-bg); }}
-.path-chip.err {{ color:var(--dev); border-color:var(--dev); background:rgba(192, 57, 43, 0.08); }}
-/* Frame count suffix inside a chip: dimmer than the label so the eye still
-   parses it as "L 67" (pipeline + number) rather than two equal tokens. */
-.path-chip .pc {{ margin-left:4px; padding-left:4px; border-left:1px solid currentColor;
-                   font-size:9px; letter-spacing:0; opacity:0.75;
-                   font-variant-numeric:tabular-nums; text-transform:none; }}
 /* Segmented control: the three mode buttons share one outer border and
    collapse their individual borders/radius so the eye reads them as a
    single exclusive choice, not three separate CTAs. */
@@ -386,22 +318,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    is off. */
 {CAM_VIEW_FULL_CSS}
 
-/* Calibration card (Phase 5). Per-camera auto-calibrate row + an
-   extended-markers block. Visually aligned with .device rows so the
-   card reads as "calibration plane" beneath Devices/Session. */
-.calib-row {{ display: grid; grid-template-columns: 28px minmax(0, 1fr) min-content;
-               align-items: center; gap: var(--s-2);
-               padding: var(--s-2) 0; }}
-.calib-row + .calib-row {{ border-top: 1px solid var(--border-l); }}
-.calib-row .id {{ font-family: var(--mono); font-size: 11px; font-weight: 700;
-                    color: var(--ink); letter-spacing: 0.08em; }}
-.calib-row .meta {{ font-family: var(--sans); font-size: 11px; color: var(--sub); }}
-.calib-sub {{ margin-top: var(--s-3); padding-top: var(--s-3);
-               border-top: 1px solid var(--border-l); }}
-.calib-sub h3 {{ font-family: var(--mono); font-size: 10px; font-weight: 500;
-                  letter-spacing: 0.14em; text-transform: uppercase;
-                  color: var(--sub); margin: 0 0 var(--s-2) 0; }}
-
 /* Runtime tunables card — two slider + number-input rows. Server owns
    the persisted value; sliders POST on `change` (keystroke commits on
    blur). Matches the segmented / button family visually. */
@@ -441,9 +357,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
    chat when a run misbehaves. */
 .sync-log-head {{ display: flex; align-items: center; gap: var(--s-2);
                    margin-top: var(--s-3); }}
-.sync-log-label {{ font-family: var(--mono); font-size: 10px;
-                    letter-spacing: 0.12em; text-transform: uppercase;
-                    color: var(--sub); flex: 1; }}
 .sync-log {{ margin: var(--s-2) 0 0 0; padding: var(--s-2);
               background: var(--surface-hover); border: 1px solid var(--border-l);
               border-radius: var(--r); font-family: var(--mono);
@@ -647,16 +560,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
                   border-radius: var(--r); color: var(--sub);
                   letter-spacing: 0.04em; opacity: 0.7; font-weight: 600;
                   font-variant-numeric: tabular-nums; }}
-/* Inline preset selector wedged into the Run-srv form — narrow, mono,
-   matches the pipe-chip aesthetic so it doesn't visually overpower the
-   adjacent button. */
-.ev-cfg-select {{ font-family: var(--mono); font-size: 10px;
-                   padding: 3px 6px; border: 1px solid var(--border-base);
-                   border-radius: var(--r); color: var(--ink);
-                   background: var(--surface, #FCFBFA);
-                   max-width: 180px; margin-right: 4px;
-                   letter-spacing: 0.04em; }}
-
 .ev-action-form {{ margin: 0; }}
 .ev-btn {{ background: transparent; border: 1px solid var(--border-base);
             color: var(--sub); font-family: var(--mono); font-size: 9px;
@@ -839,7 +742,6 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .fit-filter-bar .ff-cell + .ff-cell {{ border-left: 1px solid var(--border-base); }}
 .fit-filter-bar .ff-name {{ color: var(--ink); text-transform: uppercase; font-weight: 500; }}
 .fit-filter-bar input[type="range"] {{ width: 90px; height: 14px; }}
-.fit-filter-bar .ff-readout {{ color: var(--sub); min-width: 56px; text-align: right; }}
 .fit-filter-bar .ff-src-pill {{ font: inherit; font-size: 10px; letter-spacing: 0.08em;
                                 padding: 2px 8px; background: transparent; color: var(--sub);
                                 border: 1px solid var(--border-base); border-radius: 2px;
