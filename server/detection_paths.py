@@ -19,7 +19,7 @@ that callers still want to read and the canonical dict storage:
   slot so downstream consumers (`reconstruct.build_scene`, ray
   builders) can read a single field regardless of source.
 
-The pure helpers (`normalize_paths`, `has_server_frames`,
+The pure helpers (`normalize_paths`,
 `get_path_frames`, the `pitch_with_*` cloners) depend on nothing
 beyond the schema and are safe to call anywhere. The state-dependent
 helper (`paths_for_pitch`) reads via the public State accessors
@@ -53,16 +53,6 @@ def normalize_paths(
         except ValueError:
             continue
     return parsed
-
-
-def has_server_frames(pitch: PitchPayload) -> bool:
-    """True once the server-side MOV detection has populated
-    `pitch.frames_server_post`. Used to gate `triangulate_pair(source="server")`
-    so the early-surface path (record runs before detection finishes, with
-    `frames_server_post=[]`) doesn't flag a spurious error — it just leaves
-    `result.points=[]` until the background detect task updates the pitch
-    and we re-record."""
-    return bool(pitch and pitch.frames_server_post)
 
 
 def paths_for_pitch(state: "State", pitch: PitchPayload) -> set[DetectionPath]:
