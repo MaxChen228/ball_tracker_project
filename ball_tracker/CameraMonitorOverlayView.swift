@@ -8,10 +8,6 @@ final class CameraMonitorOverlayView {
     // MARK: - Public views (referenced by CameraStatusPresenter)
 
     let topStatusChip = StatusChip()
-    /// Text is set by CameraStatusPresenter; LED + truncated prefix stripped here.
-    let connectionLabel = UILabel()
-    /// Kept for API compatibility; hidden — preview state is implicit.
-    let previewLabel = UILabel()
     let warningLabel = UILabel()
     let stateBorderLayer = CAShapeLayer()
     let recIndicator = UIView()
@@ -37,7 +33,7 @@ final class CameraMonitorOverlayView {
     private var roleButtons: [String: _RoleButton] = [:]
     private let ipValueLabel = UILabel()
     private let linkLED = UIView()
-    private let statusTextLabel = UILabel()  // mirrors connectionLabel text
+    private let statusTextLabel = UILabel()
     private let recDotView = UIView()
     private let recTimerLabel = UILabel()
     private var recTimer: Timer?
@@ -191,10 +187,6 @@ final class CameraMonitorOverlayView {
             recTimerLabel.bottomAnchor.constraint(equalTo: recIndicator.bottomAnchor),
         ])
 
-        // previewLabel hidden — kept for presenter API compat
-        previewLabel.isHidden = true
-        // connectionLabel hidden — we mirror its text to statusTextLabel
-        connectionLabel.isHidden = true
     }
 
     // MARK: - Public API
