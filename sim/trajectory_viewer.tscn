@@ -1,0 +1,60 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://TrajectoryViewer.cs" id="1_viewer"]
+[ext_resource type="Script" path="res://FreeCamera.cs" id="2_camera"]
+
+[sub_resource type="PlaneMesh" id="ground_mesh"]
+size = Vector2(40, 60)
+
+[sub_resource type="StandardMaterial3D" id="ground_mat"]
+albedo_color = Color(0.18, 0.4, 0.16, 1)
+
+[sub_resource type="StandardMaterial3D" id="grid_mat"]
+albedo_color = Color(0.85, 0.85, 0.85, 1)
+shading_mode = 0
+
+[node name="TrajectoryViewer" type="Node3D"]
+script = ExtResource("1_viewer")
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -15)
+mesh = SubResource("ground_mesh")
+surface_material_override/0 = SubResource("ground_mat")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.5, -0.7, 0.5, 0, 0.6, 0.8, -0.9, -0.4, 0.3, 0, 20, 0)
+shadow_enabled = true
+
+[node name="FreeCamera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.94, 0.34, 0, -0.34, 0.94, 0, 2.5, 4.5)
+script = ExtResource("2_camera")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="PanelContainer" parent="UI"]
+offset_left = 10.0
+offset_top = 10.0
+offset_right = 460.0
+offset_bottom = 130.0
+
+[node name="VBox" type="VBoxContainer" parent="UI/Panel"]
+
+[node name="Row" type="HBoxContainer" parent="UI/Panel/VBox"]
+
+[node name="SessionInput" type="LineEdit" parent="UI/Panel/VBox/Row"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(240, 0)
+placeholder_text = "s_xxx (session id)"
+
+[node name="LoadButton" type="Button" parent="UI/Panel/VBox/Row"]
+unique_name_in_owner = true
+text = "Load"
+
+[node name="PlayButton" type="Button" parent="UI/Panel/VBox/Row"]
+unique_name_in_owner = true
+text = "Play/Pause"
+
+[node name="StatusLabel" type="Label" parent="UI/Panel/VBox"]
+unique_name_in_owner = true
+text = "idle — enter session id and press Load"
+autowrap_mode = 2

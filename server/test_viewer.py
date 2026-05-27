@@ -2230,3 +2230,83 @@ def test_history_dropdown_summary_falls_back_when_active_unknown():
     # summary text. The neutral fallback hides the inconsistency from
     # the operator, who fixes it by clicking any visible row.
     assert "ghost_algorithm" not in markup
+
+
+# ---------------------------------------------------------------------------
+# GET /sessions/{sid}/trajectory — Godot/sim-facing segment projection
+# ---------------------------------------------------------------------------
+
+def _seed_session_with_segments(session_id: str, algorithm_id: str) -> None:
+    """Drop a SessionResult straight into state.results so we can exercise
+    the trajectory endpoint without spinning a real pairing+segmenter run.
+    Mirrors the seeding pattern already used elsewhere in this file."""
+    seg = schemas.SegmentRecord(
+        indices=[0, 1, 2],
+        original_indices=[0, 1, 2],
+        p0=[0.0, 0.0, 1.5],
+        v0=[0.1, 35.0, 5.0],
+        t_anchor=0.0,
+        t_start=0.0,
+        t_end=0.5,
+        rmse_m=0.012,
+        speed_kph=126.4,
+    )
+    result = schemas.SessionResult(
+        session_id=session_id,
+        cameras_received={"A": True, "B": True},
+        segments_by_algorithm={algorithm_id: [seg]},
+    )
+    main.state.results[session_id] = result
+
+
+def test_session_trajectory_returns_segments_in_server_world_frame():
+    session_id = sid(42)
+    _seed_session_with_segments(session_id, schemas.IOS_CAPTURE_TIME_ALGORITHM_ID)
+    client = TestClient(app)
+    r = client.get(f"/sessions/{session_id}/trajectory")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session_id"] == session_id
+    assert body["algorithm_id"] == schemas.IOS_CAPTURE_TIME_ALGORITHM_ID
+    assert body["frame"] == "server_world"
+    assert body["gravity"] == [0.0, 0.0, -9.81]
+    assert len(body["segments"]) == 1
+    s = body["segments"][0]
+    # Raw points / index arrays must NOT leak — wire is fit-only.
+    assert "indices" not in s
+    assert "original_indices" not in s
+    assert s["p0"] == [0.0, 0.0, 1.5]
+    assert s["v0"] == [0.1, 35.0, 5.0]
+    assert s["t_anchor"] == 0.0
+    assert s["t_end"] == 0.5
+    assert s["rmse_m"] == pytest.approx(0.012)
+    assert s["speed_kph"] == pytest.approx(126.4)
+
+
+def test_session_trajectory_404_when_session_missing():
+    client = TestClient(app)
+    r = client.get(f"/sessions/{sid(43)}/trajectory")
+    assert r.status_code == 404
+
+
+def test_session_trajectory_404_when_algorithm_missing():
+    """Default algorithm is `ios_capture_time` (live). A session that
+    only has server_post results must surface a clean 404 listing what
+    IS available, not silently return an empty `segments: []`."""
+    session_id = sid(44)
+    _seed_session_with_segments(session_id, "v11_hsv_cc")  # server_post-only
+    client = TestClient(app)
+    r = client.get(f"/sessions/{session_id}/trajectory")
+    assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert "ios_capture_time" in detail
+    assert "v11_hsv_cc" in detail
+
+
+def test_session_trajectory_explicit_algorithm_query():
+    session_id = sid(45)
+    _seed_session_with_segments(session_id, "v11_hsv_cc")
+    client = TestClient(app)
+    r = client.get(f"/sessions/{session_id}/trajectory?algorithm=v11_hsv_cc")
+    assert r.status_code == 200
+    assert r.json()["algorithm_id"] == "v11_hsv_cc"

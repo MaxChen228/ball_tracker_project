@@ -1,90 +1,115 @@
-# ball_tracker_sim
+# sim — Godot trajectory viewer
 
-ball_tracker 的 Godot 端 3D 棒球模擬視覺化（接收 stereo triangulation 軌跡，跑物理 + 守備 + 判決 UI）。
+ball_tracker 的 **3D 軌跡視覺化端**。職責單一：把 server 算好的彈道擬合
+（`SegmentRecord.{p0, v0, t_anchor, ...}`）在 3D 空間畫出來、播放一顆球
+沿軌跡飛。
+
+點 / 進壘 / strike zone 判決 / 計分等 gameplay 由 dashboard 處理，**不在
+這裡**。這邊只負責「給定 session id，把擬合軌跡渲染成 3D 場景」。
 
 ## Data flow
 
 ```
-ball_tracker session (data/results/session_*.json)
-      ↓  uv run python server/godot_bridge.py --session s_xxx
-sender.py:8888                (UDP, 本專案 / Python middleware)
-      ↓  hit-feature extraction (X-Z 折點 + Z 軸反轉)
-Baseball.cs:9999              (UDP, Godot C# 3D 模擬 + PitchDecisionMenu)
+ball_tracker server (ball_tracker_project/server)
+   GET /sessions/{sid}/trajectory?algorithm={algo}
+       ↓ HTTP JSON, server world frame, segments only
+sim/TrajectoryViewer.cs
+       ↓ 反向座標轉換 (server world → Godot Y-up)
+       ↓ ImmediateMesh polyline + animated Sphere
+Godot 3D 場景
 ```
 
-兩段 UDP 都是 localhost 鬆耦合，沒有 import 依賴。
+**沒有 UDP、沒有中介 process、沒有 raw points 過線。** raw 三角化點留在
+`/results/{sid}` 給 dashboard 畫散佈，本 viewer 只吃擬合結果。
 
 ## Wire schema
 
-**ball_tracker `godot_bridge.py` → `sender.py:8888`**（已 swap Y↔Z，bridge 端負責）
+`GET /sessions/{sid}/trajectory?algorithm={algorithm_id}`：
 
 ```json
 {
-  "trajectory": [
-    {"t": 0.0, "x": 0.0, "y": 1.5, "z": -18.44},
-    ...
+  "session_id": "s_xxx",
+  "algorithm_id": "ios_capture_time",
+  "frame": "server_world",
+  "gravity": [0.0, 0.0, -9.81],
+  "segments": [
+    {
+      "p0": [x, y, z],
+      "v0": [vx, vy, vz],
+      "t_anchor": 1.234,
+      "t_start": 1.200, "t_end": 1.560,
+      "rmse_m": 0.018,
+      "speed_kph": 142.3
+    }
   ]
 }
 ```
 
-- `t` 秒；`x, y, z` 公尺，Godot frame（見座標系）
-- 至少 3 點才會跑 hit-feature 抽取
+Client 端用標準彈道公式取樣畫曲線：
 
-**`sender.py` → `Baseball.cs:9999`**
-
-```json
-{
-  "pitch_x_m": 0.08,
-  "pitch_y_m": 0.82,
-  "call": "WAITING_UI",
-  "exit_velocity_mph": 0.0,
-  "launch_angle_deg": 0.0,
-  "spray_angle_deg": 0.0,
-  "spin_rate_rpm": 2200.0
-}
+```
+p(τ) = p0 + v0·(τ - t_anchor) + ½·G·(τ - t_anchor)²
 ```
 
-- 投球無打擊時 exit/launch/spray 全 0，Godot 收到 `WAITING_UI` 會彈 PitchDecisionMenu
-- 偵測到擊球折點時三項填實值
+擬合曲線的 single source of truth 是這幾個參數，dashboard / Godot / 未來
+notebook 各自取樣，不會 drift。
+
+`algorithm` query 預設 `ios_capture_time`（live 路徑）；server_post
+algorithm 用 `?algorithm=v11_hsv_cc` 之類。session 沒對應 algorithm 的
+fit 結果會 404 並列出可用算法 — **不會 silent 回空陣列**。
+
+## 座標系轉換（在 sim 端）
+
+| 軸 | server world | Godot frame |
+|---|---|---|
+| X | 右（baseline 方向） | 右 |
+| Y | 本壘 → 投手丘 | **上** |
+| Z | **上** | 本壘 → 投手丘的 **反方向** (-Z) |
+
+對應映射（`TrajectoryViewer.cs::ServerToGodot`）：
+
+```
+godot.x =  server.x
+godot.y =  server.z
+godot.z = -server.y
+```
+
+重力檢查：`(0, 0, -9.81)` server → `(0, -9.81, 0)` Godot ✓。
+
+座標轉換**只在 consumer 做**。server 永遠送 server world frame，dashboard
+也是 consumer，自己 transform。依賴方向才不會反掉。
 
 ## Run
 
 兩個 terminal：
 
-**Terminal A** — Godot 端 middleware（daemon）
+**Terminal A** — ball_tracker server（如果還沒在跑）：
 
 ```bash
-python sender.py --daemon
-# 可選：--listen-port 8888 --godot-host 127.0.0.1 --godot-port 9999
+cd ball_tracker_project/server
+uv run uvicorn main:app --host 0.0.0.0 --port 8765
 ```
 
-接著用 Godot 開啟 `ball_tracker_sim.sln` / `project.godot` 跑模擬。
+**Terminal B** — Godot：用 Godot 4.6 開 `ball_tracker_sim.sln` /
+`project.godot`，按 ▶。main scene 是 `trajectory_viewer.tscn`。
 
-**Terminal B** — ball_tracker 推送（在 `ball_tracker_project/` 下）
+UI 左上角輸入 session id (`s_xxx`) → Load → Play/Pause。WASD 飛行、滑鼠
+轉視角、ESC 釋放滑鼠。
 
-```bash
-uv run python server/godot_bridge.py --list                 # 看 session 列表
-uv run python server/godot_bridge.py --session s_xxx        # 推送指定 session
-```
+## 改 server URL / 預設值
 
-`sender.py` 也保留互動模式：直接 `python sender.py` 進選單，可選內建擊球/揮空/讀 JSON/切到監聽。
+`TrajectoryViewer` 是 `Node3D`，Inspector 裡有 5 個 export：
 
-## 座標系（Godot frame）
+- `Server Base Url`（預設 `http://127.0.0.1:8765`）
+- `Default Session Id`（預設空，要手動輸入）
+- `Default Algorithm Id`（預設 `ios_capture_time`）
+- `Samples Per Segment`（每段擬合曲線取樣點數，預設 80）
+- `Playback Speed`（球飛行速度倍率，預設 0.5）
 
-- **X** 左右（+X 一壘方向）
-- **Y** 上（+Y 天空）
-- **Z** 朝/離投手（-Z 朝投手丘 / 中外野，+Z 朝本壘後方）
-- 原點：本壘板正上方地面
+## 不要做的事
 
-ball_tracker 那邊用的是相機/世界座標，`godot_bridge.py` 已負責 swap Y↔Z 與符號對齊，**本專案不要再做 transform**。
-
-## Coupling note
-
-`sender.py` 的 wire schema 是 ball_tracker `godot_bridge.py` 的 reverse contract。**任一邊改 schema，兩邊都要同步動**（field 名、單位、座標約定）。兩個 repo lockstep 部署，不做向後相容 shim。
-
-## Files
-
-- `sender.py` — Python middleware（UDP in 8888 → hit-feature → UDP out 9999）
-- `Baseball.cs` — Godot 端 UDP listener + 3D 物理 + 判決流程（**不要改動**）
-- `PitchDecisionMenu.cs` / `ScoreBugUI.cs` / `DefenseManager.cs` / `Fielder.cs` 等 — Godot 端 UI / 守備
-- `project.godot` / `ball_tracker_sim.sln` / `ball_tracker_sim.csproj` — Godot 4.6 + C# 專案檔
+- 不要在 sim 加 raw 三角化點的散佈 — 那是 dashboard debug 視覺
+- 不要在 sim 加 strike zone / pitch decision UI — dashboard 的事
+- 不要從 sim 動 server 的座標約定（server world frame 是 server 的內部
+  事，sim 配合 transform 就好；transform 不對是 sim 改、不是 server 改）
+- 不要重新引入 UDP / sender.py 那條兩跳路徑（已退役）
