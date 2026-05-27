@@ -78,7 +78,6 @@ server/charuco_board.png
 !.claude/skills/**
 
 .DS_Store
-lab/research/outputs/
 
 # Ad-hoc artifacts that occasionally land in repo root (PDF cleanup
 # experiments etc.). Not part of the project; keep them ignored so a
