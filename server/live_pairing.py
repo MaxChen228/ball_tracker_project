@@ -14,13 +14,12 @@ from schemas import FramePayload, TriangulatedPoint
 logger = logging.getLogger("ball_tracker")
 
 
-_OTHER_CAM = {"A": "B", "B": "A"}
-
-# Sentinel for "no sync anchor on either cam yet" — produced explicitly so
-# call sites (tests, pre-arm fixtures) can't silently fall through the old
-# `(anchors or {}).get(...)` path. Production path always builds a real
-# anchors dict from `state.device_for_camera` inside `ingest_live_frame`.
-NO_ANCHORS: dict[str, float | None] = {"A": None, "B": None}
+# Sentinel for "no sync anchors known yet" — an empty dict, so any
+# `anchors.get(cam_id)` returns None explicitly without silently falling
+# through `(anchors or {})` style guards. Production callers
+# (`state_detection.ingest_live_frame`) build a real dict keyed by the
+# rig's camera_ids. Test fixtures / pre-arm callers default to {}.
+NO_ANCHORS: dict[str, float | None] = {}
 
 
 @dataclass
@@ -46,25 +45,27 @@ class CameraPose:
 
 @dataclass
 class LivePairingSession:
-    """Incremental live A/B pairing over a bounded rolling window."""
+    """Incremental cross-camera pairing over a bounded rolling window.
+
+    Pair-based today (one ingest produces 0–N pairs against the single
+    peer cam's buffer), but the per-cam dicts are camera_id-keyed so
+    a future N-camera live session can grow buffers organically as new
+    cameras stream their first frame."""
 
     session_id: str
     # Cross-cam pairing window. Match the server_post pairing constant
     # (`pairing._MAX_DT_S`, default 1/120 ≈ 8.33 ms) so live and
-    # server_post don't silently disagree on which A/B frame pairs are
-    # eligible — that mismatch was the subtle bug behind a 5 % drop in
-    # live-pair yield vs. reprocess for the same MOVs.
+    # server_post don't silently disagree on which cross-cam frame pairs
+    # are eligible — that mismatch was the subtle bug behind a 5 % drop
+    # in live-pair yield vs. reprocess for the same MOVs.
     window_s: float = _SERVER_POST_WINDOW_S
     max_frames_per_cam: int = 500
-    buffers: dict[str, deque[FramePayload]] = field(
-        default_factory=lambda: {"A": deque(), "B": deque()}
-    )
-    frames_by_cam: dict[str, list[FramePayload]] = field(
-        default_factory=lambda: {"A": [], "B": []}
-    )
-    frame_counts: dict[str, int] = field(
-        default_factory=lambda: {"A": 0, "B": 0}
-    )
+    # Per-cam buffers grow lazily on first ingest. Empty dict is the
+    # "no frame seen yet from any camera" baseline; ingest() uses
+    # `setdefault` to materialize the deque on first touch per cam_id.
+    buffers: dict[str, deque[FramePayload]] = field(default_factory=dict)
+    frames_by_cam: dict[str, list[FramePayload]] = field(default_factory=dict)
+    frame_counts: dict[str, int] = field(default_factory=dict)
     triangulated: list[TriangulatedPoint] = field(default_factory=list)
     # Dedupe key for already-triangulated candidate pairs, keyed by
     # (a_frame_idx, b_frame_idx, ca_idx, cb_idx) — the candidate-index
@@ -178,9 +179,22 @@ class LivePairingSession:
             if not frame.ball_detected:
                 return []
 
-            other = _OTHER_CAM.get(cam)
-            if other is None:
+            # Peer cam = the single other cam_id whose buffer has any
+            # frames. Pair-based today: 0 peers (only this cam has ever
+            # streamed) → no pairs yet; exactly 1 peer → run the window
+            # match below. 2+ peers (future N-camera rig) currently NOT
+            # supported by this loop — raise loudly rather than silently
+            # picking the lexically-first peer.
+            peer_cams = [c for c in self.buffers if c != cam and self.buffers[c]]
+            if not peer_cams:
                 return []
+            if len(peer_cams) > 1:
+                raise NotImplementedError(
+                    f"live_pairing: {len(peer_cams)} peer cams "
+                    f"({peer_cams}) — N-view live pairing is a future "
+                    "phase; today only one peer is supported"
+                )
+            other = peer_cams[0]
             own_anchor = anchors.get(cam)
             peer_anchor = anchors.get(other)
             if (own_anchor is None) != (peer_anchor is None):
@@ -206,13 +220,15 @@ class LivePairingSession:
                     break
                 if abs(dt) > self.window_s or not peer.ball_detected:
                     continue
-                # Canonicalize frame ordering: A-cam first, B-cam second,
-                # regardless of which cam triggered this ingest call. The
-                # callback receives (frame_a, frame_b) in that order so
-                # `triangulate_live_pair` stamps source_a_cand_idx from
-                # the A-side index by construction — no comment-only
-                # contract needed.
-                if cam == "A":
+                # Canonicalize frame ordering by lexical cam_id so the
+                # callback always sees (lower_cam_frame, higher_cam_frame).
+                # Today this happens to be (A, B); a future rig with cam_ids
+                # like {"A","B","C"} keeps the contract stable. The
+                # callback (`triangulate_live`) reads pose_a / pose_b in
+                # this canonical order — caller still uses A/B-keyed pose
+                # lookup, so until that's generalized the rig must keep
+                # using "A" + "B" as its two cam_ids.
+                if cam < other:
                     frame_a, frame_b = frame, peer
                 else:
                     frame_a, frame_b = peer, frame
