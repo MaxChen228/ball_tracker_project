@@ -8,6 +8,8 @@ from threading import Lock
 from typing import Any, Callable
 
 from schemas import (
+    RoleSyncTimes,
+    RoleSyncTraces,
     SyncLogEntry,
     SyncReport,
     SyncResult,
@@ -352,24 +354,30 @@ class SyncCoordinator:
             reasons.setdefault(report.role, "aborted_late")
         updates["abort_reasons"] = reasons
         updates["aborted"] = True
-        if report.role == "A":
-            if report.trace_self is not None:
-                updates["trace_a_self"] = report.trace_self
-            if report.trace_other is not None:
-                updates["trace_a_other"] = report.trace_other
-            if report.t_self_s is not None:
-                updates["t_a_self_s"] = report.t_self_s
-            if report.t_from_other_s is not None:
-                updates["t_a_from_b_s"] = report.t_from_other_s
-        else:
-            if report.trace_self is not None:
-                updates["trace_b_self"] = report.trace_self
-            if report.trace_other is not None:
-                updates["trace_b_other"] = report.trace_other
-            if report.t_self_s is not None:
-                updates["t_b_self_s"] = report.t_self_s
-            if report.t_from_other_s is not None:
-                updates["t_b_from_a_s"] = report.t_from_other_s
+        # Merge this role's late telemetry into the existing dicts.
+        # Existing model_copy `update=` replaces top-level keys outright,
+        # so we rebuild the two dicts here rather than relying on a
+        # deep merge that pydantic doesn't perform.
+        times = dict(result.times_by_role)
+        traces = dict(result.traces_by_role)
+        existing_times = times.get(report.role) or RoleSyncTimes()
+        existing_traces = traces.get(report.role) or RoleSyncTraces()
+        time_updates: dict[str, Any] = {}
+        if report.t_self_s is not None:
+            time_updates["t_self_s"] = report.t_self_s
+        if report.t_from_other_s is not None:
+            time_updates["t_from_other_s"] = report.t_from_other_s
+        if time_updates:
+            times[report.role] = existing_times.model_copy(update=time_updates)
+        trace_updates: dict[str, Any] = {}
+        if report.trace_self is not None:
+            trace_updates["self_trace"] = report.trace_self
+        if report.trace_other is not None:
+            trace_updates["other_trace"] = report.trace_other
+        if trace_updates:
+            traces[report.role] = existing_traces.model_copy(update=trace_updates)
+        updates["times_by_role"] = times
+        updates["traces_by_role"] = traces
         self._last_sync_result = result.model_copy(update=updates)
         self._sync_log.append(SyncLogEntry(
             ts=now, source="server", event="report_late_merged",
@@ -460,21 +468,28 @@ class SyncCoordinator:
             run.id, "B.self",  rep_b.trace_self if rep_b else None, thr)
         self._log_trace_post_mortem_locked(
             run.id, "B.other", rep_b.trace_other if rep_b else None, thr)
+        times_by_role: dict[str, RoleSyncTimes] = {}
+        traces_by_role: dict[str, RoleSyncTraces] = {}
+        for role, rep in (("A", rep_a), ("B", rep_b)):
+            if rep is None:
+                continue
+            times_by_role[role] = RoleSyncTimes(
+                t_self_s=rep.t_self_s,
+                t_from_other_s=rep.t_from_other_s,
+            )
+            traces_by_role[role] = RoleSyncTraces(
+                self_trace=rep.trace_self,
+                other_trace=rep.trace_other,
+            )
         return SyncResult(
             id=run.id,
             delta_s=None,
             distance_m=None,
             solved_at=solved_at,
-            t_a_self_s=rep_a.t_self_s if rep_a else None,
-            t_a_from_b_s=rep_a.t_from_other_s if rep_a else None,
-            t_b_self_s=rep_b.t_self_s if rep_b else None,
-            t_b_from_a_s=rep_b.t_from_other_s if rep_b else None,
+            times_by_role=times_by_role,
             aborted=True,
             abort_reasons=reasons,
-            trace_a_self=rep_a.trace_self if rep_a else None,
-            trace_a_other=rep_a.trace_other if rep_a else None,
-            trace_b_self=rep_b.trace_self if rep_b else None,
-            trace_b_other=rep_b.trace_other if rep_b else None,
+            traces_by_role=traces_by_role,
         )
 
     def start_sync_locked(
@@ -613,10 +628,16 @@ class SyncCoordinator:
                 return None, result, None
             result = compute_mutual_sync(rep_a, rep_b, solved_at=now)
             result = result.model_copy(update={
-                "trace_a_self": rep_a.trace_self,
-                "trace_a_other": rep_a.trace_other,
-                "trace_b_self": rep_b.trace_self,
-                "trace_b_other": rep_b.trace_other,
+                "traces_by_role": {
+                    "A": RoleSyncTraces(
+                        self_trace=rep_a.trace_self,
+                        other_trace=rep_a.trace_other,
+                    ),
+                    "B": RoleSyncTraces(
+                        self_trace=rep_b.trace_self,
+                        other_trace=rep_b.trace_other,
+                    ),
+                },
             })
             self._last_sync_result = result
             self._current_sync = None

@@ -28,7 +28,7 @@ D but NOT Δ — Δ is purely geometric/temporal and is sound-speed-free.
 
 from __future__ import annotations
 
-from schemas import SyncReport, SyncResult
+from schemas import RoleSyncTimes, SyncReport, SyncResult
 
 
 # Dry air at 20 °C. Good to ~0.5% over 0–40 °C; the D we care about is
@@ -67,8 +67,14 @@ def compute_mutual_sync(
         delta_s=delta_s,
         distance_m=distance_m,
         solved_at=solved_at,
-        t_a_self_s=report_a.t_self_s,
-        t_a_from_b_s=report_a.t_from_other_s,
-        t_b_self_s=report_b.t_self_s,
-        t_b_from_a_s=report_b.t_from_other_s,
+        times_by_role={
+            "A": RoleSyncTimes(
+                t_self_s=report_a.t_self_s,
+                t_from_other_s=report_a.t_from_other_s,
+            ),
+            "B": RoleSyncTimes(
+                t_self_s=report_b.t_self_s,
+                t_from_other_s=report_b.t_from_other_s,
+            ),
+        },
     )
