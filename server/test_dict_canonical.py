@@ -249,7 +249,7 @@ def test_result_projections_from_dict_canonical_construction():
     srv_snap = _snapshot("v11_hsv_cc")
     r = SessionResult(
         session_id="s_deadbeef",
-        camera_a_received=True, camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated_by_algorithm={
             IOS_CAPTURE_TIME_ALGORITHM_ID: [_tri_point()],
             "v11_hsv_cc": [_tri_point(), _tri_point()],
@@ -286,7 +286,7 @@ def test_paths_completed_excludes_non_current_alg_history():
     `triangulated_by_path` (which only surfaces the current pointer)."""
     r = SessionResult(
         session_id="s_deadbeef",
-        camera_a_received=True, camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated_by_algorithm={"v12_test": [_tri_point()]},
         algorithms_completed={"v12_test"},
         active_server_post_algorithm_id="v11_hsv_cc",  # v11 is current, but never ran
@@ -308,7 +308,7 @@ def test_persist_result_json_drops_flat_keys_from_disk_payload():
 
     r = SessionResult(
         session_id="s_deadbeef",
-        camera_a_received=True, camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated_by_algorithm={"v11_hsv_cc": [_tri_point()]},
         algorithms_completed={"v11_hsv_cc"},
         active_server_post_algorithm_id="v11_hsv_cc",

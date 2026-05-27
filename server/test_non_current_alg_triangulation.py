@@ -74,8 +74,7 @@ def _pitch(camera_id: str = "A", **kw) -> PitchPayload:
 def _empty_result() -> SessionResult:
     return SessionResult(
         session_id="s_deadbeef",
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
     )
 
 

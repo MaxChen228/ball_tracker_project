@@ -509,8 +509,11 @@ class SessionResult(BaseModel):
     and the pitch unit is server-level "session"."""
     model_config = ConfigDict(extra="forbid")
     session_id: str
-    camera_a_received: bool
-    camera_b_received: bool
+    # camera_id → "did this session ingest a PitchPayload from that cam".
+    # Keys are whatever camera_ids the rig knows about (today "A"/"B";
+    # future N-camera rigs will simply grow the dict). No silent
+    # fallback when a key is missing — callers must check membership.
+    cameras_received: dict[str, bool]
     solved_at: float | None = None
     # Latest successful server_post run timestamp across both cams.
     # Aggregated from `PitchPayload.server_post_ran_at` (max of A/B) at

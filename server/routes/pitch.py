@@ -25,7 +25,11 @@ logger = logging.getLogger("ball_tracker")
 
 
 def _summarize_result(result: SessionResult) -> dict[str, Any]:
-    paired = result.camera_a_received and result.camera_b_received
+    # Semantics: every camera the rig knows about delivered a pitch.
+    # Today the rig has A+B (2 cameras), tomorrow N — empty dict guards
+    # the "no cameras registered yet" edge case explicitly.
+    received = result.cameras_received
+    paired = bool(received) and all(received.values())
     summary: dict[str, Any] = {
         "session_id": result.session_id,
         "paired": paired,

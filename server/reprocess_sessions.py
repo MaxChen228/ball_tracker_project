@@ -271,8 +271,7 @@ def triangulate_session(
     b = pitches.get("B")
     result = SessionResult(
         session_id=sid,
-        camera_a_received=a is not None,
-        camera_b_received=b is not None,
+        cameras_received={"A": a is not None, "B": b is not None},
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
     used = session_results.aggregate_pitch_used_configs(a, b, sid)

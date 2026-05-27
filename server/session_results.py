@@ -338,16 +338,14 @@ def empty_result_for_session(
     state: "State",
     session_id: str,
     *,
-    camera_a_received: bool,
-    camera_b_received: bool,
+    cameras_received: dict[str, bool],
 ) -> SessionResult:
     """Lock-free pure constructor — do not wrap the call in `state._lock`;
     the only state read is `state.now()`, which is an injectable
     callable."""
     return SessionResult(
         session_id=session_id,
-        camera_a_received=camera_a_received,
-        camera_b_received=camera_b_received,
+        cameras_received=dict(cameras_received),
         solved_at=state.now(),
     )
 
@@ -363,8 +361,7 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     result = empty_result_for_session(
         state,
         session_id,
-        camera_a_received=a is not None,
-        camera_b_received=b is not None,
+        cameras_received={"A": a is not None, "B": b is not None},
     )
     result.gap_threshold_m = pairing_tuning.gap_threshold_m
     # Aggregate the two cams' last-run timestamps — the more recent one
@@ -724,8 +721,7 @@ def recompute_result_for_session(
     result = empty_result_for_session(
         state,
         session_id,
-        camera_a_received=a is not None,
-        camera_b_received=b is not None,
+        cameras_received={"A": a is not None, "B": b is not None},
     )
     result.gap_threshold_m = float(gap_threshold_m)
 

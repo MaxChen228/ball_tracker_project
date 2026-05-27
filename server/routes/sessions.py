@@ -106,7 +106,7 @@ async def sessions_stop(request: Request):
         {
             "sid": ended.id,
             "paths_completed": sorted(
-                state.results.get(ended.id, SessionResult(session_id=ended.id, camera_a_received=False, camera_b_received=False)).paths_completed
+                state.results.get(ended.id, SessionResult(session_id=ended.id, cameras_received={})).paths_completed
             ),
         },
     )
