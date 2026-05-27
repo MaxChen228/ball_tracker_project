@@ -1459,6 +1459,31 @@ class State:
         with self._lock:
             return self._device_registry.known_camera_ids()
 
+    def expected_camera_ids(self) -> list[str]:
+        """Camera IDs the dashboard should render slots for, sorted
+        lexically. Single source of truth for "which cameras does this
+        rig know about" — used by both the JS bootstrap (injected as
+        `window.__EXPECTED_CAMS__`) and every server-side render helper
+        that iterated `("A","B")` literals pre-N-camera refactor.
+
+        Today's rig configuration is hard-baked at A + B (the canonical
+        pair). The union with `known_camera_ids` / calibration store
+        keys means a future third camera that registers via heartbeat
+        or auto-cal grows the set automatically — the operator does
+        not need to redeploy the server.
+
+        Downstream code MUST iterate over this list, never literal A/B
+        tuples — that is the contract that lets N-camera support land
+        without touching dashboard / viewer surface."""
+        with self._lock:
+            known = set(self._device_registry.known_camera_ids())
+            cal = set(self._calibration_store.snapshot().keys())
+        # A + B is the static rig baseline. Even when only A has
+        # heartbeated and B has never connected, B's slot should still
+        # render so the operator sees "B: offline" rather than the
+        # slot disappearing.
+        return sorted(known | cal | {"A", "B"})
+
     def device_snapshot(self, camera_id: str) -> Device | None:
         with self._lock:
             return self._device_registry.snapshot(camera_id)

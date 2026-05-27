@@ -35,6 +35,10 @@ _JS_TEMPLATE = r"""
     const sessionArmed = !!(state.session && state.session.armed);
     const cooldown = Number(state.sync_cooldown_remaining_s || 0);
     const onlineIds = new Set((state.devices || []).map(d => d.camera_id));
+    // Mutual chirp sync is intrinsically pair-wise (two phones exchange
+    // chirps) so the "ready" check still requires A + B online even
+    // when the rig grows past 2 cameras. N-way sync topology = future
+    // phase.
     const bothOnline = onlineIds.has('A') && onlineIds.has('B');
     const syncing = !!sync;
     const cooling = cooldown > 0;
@@ -254,6 +258,9 @@ _JS_TEMPLATE = r"""
     const devs = state.devices || [];
     const pending = state.sync_commands || {};
     const run = state.sync || null;
+    // Per-cam sync cards are pair-wise for now (mutual chirp involves
+    // exactly 2 phones). When N-way sync ships, switch this to the
+    // SSR-injected EXPECTED list.
     const expected = ['A', 'B'];
     const byId = new Map(devs.map(d => [d.camera_id, d]));
     // Check whether both cams ended up with the same id — the

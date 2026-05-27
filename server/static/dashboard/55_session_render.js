@@ -86,10 +86,10 @@
         <form class="inline" method="POST" action="/sync/trigger">
           <button class="btn secondary" type="submit" data-role="sync-btn">Quick chirp</button>
         </form>
-        <span class="sync-led" data-role="led-A">A</span>
-        <span class="sync-age" data-role="age-A">—</span>
-        <span class="sync-led" data-role="led-B">B</span>
-        <span class="sync-age" data-role="age-B">—</span>
+        ${EXPECTED.map(cam => (
+          `<span class="sync-led" data-role="led-${cam}">${cam}</span>`
+          + `<span class="sync-age" data-role="age-${cam}">—</span>`
+        )).join('')}
       </div>`;
     const $ = sel => sessionBox.querySelector(sel);
     sessionDom = {
@@ -103,10 +103,17 @@
       gateText: $('[data-role=gate-text]'),
       armError: $('[data-role=arm-error]'),
       syncBtn: $('[data-role=sync-btn]'),
-      ledA: $('[data-role=led-A]'),
-      ledB: $('[data-role=led-B]'),
-      ageA: $('[data-role=age-A]'),
-      ageB: $('[data-role=age-B]'),
+      // Per-cam LED + age refs, keyed by cam id. Dynamic against
+      // EXPECTED so adding a third camera grows the LED strip without
+      // touching this DOM cache. Falsy entries (DOM lookup miss) bubble
+      // up as `undefined` and any consumer that forgets the `if (el)`
+      // guard will fail loud rather than silently no-op.
+      leds: Object.fromEntries(
+        EXPECTED.map(cam => [cam, $(`[data-role=led-${cam}]`)])
+      ),
+      ages: Object.fromEntries(
+        EXPECTED.map(cam => [cam, $(`[data-role=age-${cam}]`)])
+      ),
     };
     sessionDom.armForm.addEventListener('submit', onArmSubmit);
     return sessionDom;
@@ -199,10 +206,12 @@
       }
       // quick chirp button
       if (dom.syncBtn.disabled !== armed) dom.syncBtn.disabled = armed;
-      // sync LEDs
-      for (const cam of ['A', 'B']) {
-        const led = cam === 'A' ? dom.ledA : dom.ledB;
-        const ageEl = cam === 'A' ? dom.ageA : dom.ageB;
+      // sync LEDs — iterate over the rig's configured cameras so a
+      // third camera grows the LED strip without code changes.
+      for (const cam of EXPECTED) {
+        const led = dom.leds[cam];
+        const ageEl = dom.ages[cam];
+        if (!led) continue;
         const { cls, tip, ageText } = syncLedState(state, cam);
         const klass = 'sync-led ' + cls;
         if (led.className !== klass) led.className = klass;

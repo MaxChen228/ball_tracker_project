@@ -35,7 +35,10 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  const _ROLES = ['A', 'B'];
+  // Rig cameras come from the SSR-injected EXPECTED list (see
+  // 10_state_globals.js). Adding a third camera grows the pairing
+  // table without code changes.
+  const _ROLES = EXPECTED;
 
   function _renderPairingRow(role, info, recordIds) {
     if (!info) {

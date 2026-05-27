@@ -10,6 +10,12 @@
   // data on this pipeline — the empty row is load-bearing for single-camera
   // sessions (e.g. live-only A-only) so the operator can see "B is silent"
   // instead of misreading a full-width A track as both cams.
+  // TODO(n-camera): pair-cam-specific layout. The 3-band equal-thirds
+  // split (A · B · SEG) below assumes exactly 2 cameras + a SEG band.
+  // For an N-camera rig, switch to N+1 bands keyed off DATA.scene.cameras
+  // and adjust SEG_BAND_FRAC_*. Today every shipped session has A/B so
+  // this stays hardcoded for the strip-renderer's frame-by-frame
+  // arithmetic.
   const STRIP_CAMS = ["A", "B"];
   // A / B / SEG share strip height equally. Earlier 12/12/8 split made the
   // SEG band feel cramped when the operator dragged the timeline taller.

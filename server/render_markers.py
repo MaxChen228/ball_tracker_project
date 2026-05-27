@@ -311,6 +311,9 @@ _MARKERS_JS = r"""
         x: [c[0]], y: [c[1]], z: [c[2]],
         text: [`CAM ${cam.camera_id}`],
         textposition: 'bottom center',
+        // 2-cam rig still owns the canonical A/B colour pair; any
+        // extra camera id falls through to the secondary orange so the
+        // marker stays visible on the plot.
         marker: { size: 6, color: cam.camera_id === 'A' ? '#C0392B' : '#D35400' },
         hovertemplate: `Camera ${cam.camera_id}<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=%{z:.2f}<extra></extra>`,
       });
@@ -527,7 +530,9 @@ _MARKERS_JS = r"""
   }
 
   async function tickPreviewRefresh() {
-    const cams = ['A', 'B'];
+    // Cameras the rig knows about, derived from the scene's camera
+    // metadata so a third camera grows the refresh loop automatically.
+    const cams = (state.scene.cameras || []).map(c => c.camera_id);
     await Promise.all(cams.map(async cam => {
       try {
         await fetch('/camera/' + encodeURIComponent(cam) + '/preview_request', {
@@ -841,10 +846,12 @@ _MARKERS_JS = r"""
     for (const cam of (state.scene.cameras || [])) {
       window.BallTrackerCamView.setMeta(cam.camera_id, cam);
     }
-    window.BallTrackerCamView.onCanvasClick('A', handleCamClick);
-    window.BallTrackerCamView.onCanvasClick('B', handleCamClick);
-    window.BallTrackerCamView.startPreviewPolling('A');
-    window.BallTrackerCamView.startPreviewPolling('B');
+    // Wire click + preview polling for every camera in the scene so a
+    // third-camera rig adds its preview tile without code changes.
+    for (const cam of (state.scene.cameras || [])) {
+      window.BallTrackerCamView.onCanvasClick(cam.camera_id, handleCamClick);
+      window.BallTrackerCamView.startPreviewPolling(cam.camera_id);
+    }
     window.BallTrackerCamView.startCalibrationPolling();
   }
 

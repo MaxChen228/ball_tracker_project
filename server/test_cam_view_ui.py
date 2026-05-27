@@ -537,8 +537,11 @@ def test_markers_page_uses_cam_view_with_footprint_layer():
     assert 'data-layers-on="plate,marker_footprints"' in body
     # Layer registration + click wiring inside _MARKERS_JS.
     assert "registerLayer('marker_footprints'" in body
-    assert "onCanvasClick('A'" in body
-    assert "onCanvasClick('B'" in body
+    # Click + preview wiring now loops over the scene's cameras (N-camera
+    # ready) — assert the pattern + the click target rather than the
+    # legacy literal A/B calls.
+    assert "onCanvasClick(cam.camera_id, handleCamClick)" in body
+    assert "startPreviewPolling(cam.camera_id)" in body
     # Marker hit-test uses image-space u/v matching projectWorldToPixel.
     assert "handleCamClick" in body
 
@@ -636,8 +639,8 @@ def test_markers_page_preview_poll_uses_runtime_api():
     so a cross-tab auto-cal updates marker footprints in-place
     without a manual reload."""
     from render_markers import _MARKERS_JS
-    assert "BallTrackerCamView.startPreviewPolling('A')" in _MARKERS_JS
-    assert "BallTrackerCamView.startPreviewPolling('B')" in _MARKERS_JS
+    # Preview poll now driven by a scene.cameras loop (N-camera ready).
+    assert "BallTrackerCamView.startPreviewPolling(cam.camera_id)" in _MARKERS_JS
     assert "BallTrackerCamView.startCalibrationPolling" in _MARKERS_JS
     # Legacy inline tickPreviewImages + setInterval removed.
     assert "function tickPreviewImages" not in _MARKERS_JS

@@ -91,16 +91,19 @@
         if (!p) return '—';
         return p.total ? `${p.done}/${p.total}` : `${p.done}`;
       };
-      const body = `<b>${fmt('A')}·${fmt('B')}</b>`;
+      // Iterate over the rig's configured cameras so a third camera
+      // grows the inline progress chip without code changes.
+      const body = `<b>${EXPECTED.map(fmt).join('·')}</b>`;
       return `<span class="ev-pipe${cls}" title="${esc(title + ' · in progress')}">${label}${body}</span>`;
     }
     counts = counts || {};
     let body;
     let titleFull = title;
     if (Object.keys(counts).length) {
-      const a = 'A' in counts ? String(Number(counts.A || 0)) : '—';
-      const b = 'B' in counts ? String(Number(counts.B || 0)) : '—';
-      body = `<b>${a}·${b}</b>`;
+      const parts = EXPECTED.map(cam => (
+        cam in counts ? String(Number(counts[cam] || 0)) : '—'
+      ));
+      body = `<b>${parts.join('·')}</b>`;
       const detail = Object.keys(counts).sort().map(c => `${c}:${counts[c]}`).join(', ');
       if (detail) titleFull += ' · ' + detail;
     } else {

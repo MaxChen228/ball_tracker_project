@@ -121,7 +121,9 @@
     for (const path of PATHS) {
       const cams = camsWithFramesByPath[path];
       if (!cams.length) continue;
-      const cells = ["A", "B"].map((cam) => {
+      // Render one cell per camera in the scene so an N-camera viewer
+      // grows the frame-label row without code changes.
+      const cells = DATA.scene.cameras.map(c => c.camera_id).map((cam) => {
         if (!cams.includes(cam)) return `<span class="fl-cell fl-cell-blank">${cam}:—</span>`;
         const entry = camAtFrameByPath[path][cam][currentFrame];
         if (!entry) return `<span class="fl-cell fl-cell-blank">${cam}:—</span>`;
@@ -141,7 +143,7 @@
   // over the video as a DOM overlay. Same verdict / frame_index data, but
   // independent surface so OVL=0 (pure video) keeps the HUD legible.
   function renderHuds() {
-    for (const cam of ["A", "B"]) {
+    for (const cam of DATA.scene.cameras.map(c => c.camera_id)) {
       const hud = document.querySelector(`[data-cam-hud="${cam}"]`);
       if (!hud) continue;
       const lines = [];

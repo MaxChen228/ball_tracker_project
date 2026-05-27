@@ -409,10 +409,10 @@
         _patchRow(rowEl, cam, fieldsFor(cam));
       }
     }
-    // Push online status + RMS extras for every rendered cam (EXPECTED A/B
-    // plus any extra cams that registered with non-A/B ids). Calibration
-    // truth is derived inside the runtime from setMeta payload — don't
-    // pass it here.
+    // Push online status + RMS extras for every rendered cam (the
+    // SSR-injected EXPECTED list plus any extra cams that registered
+    // with ids outside that set). Calibration truth is derived inside
+    // the runtime from setMeta payload — don't pass it here.
     if (window.BallTrackerCamView) {
       const onlineSet = new Set((state.devices || []).map(d => d.camera_id));
       const renderedCams = new Set(EXPECTED);

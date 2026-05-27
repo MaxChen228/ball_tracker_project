@@ -10,6 +10,8 @@ modules until the runtime API stabilises.
 """
 from __future__ import annotations
 
+import json
+
 from scene_runtime import (
     fit_extension_seconds_slider_html,
     fit_line_width_slider_html,
@@ -34,6 +36,7 @@ def render_dashboard_html(
     overlays_js: str,
     cam_view_js: str,
     dashboard_js: str,
+    expected_cams: list[str],
     trash_count: int,
 ) -> str:
     return (
@@ -181,6 +184,13 @@ def render_dashboard_html(
         f"{scene_div}"
         "</section>"
         "</div>"
+        # Rig-config injection. The dashboard JS bundle reads
+        # `window.__EXPECTED_CAMS__` as the single source of truth for
+        # the camera list to render slots / poll previews for. SSR'd
+        # from `state.expected_camera_ids()` so the bundle stays
+        # camera-agnostic — adding a third camera to the rig requires
+        # no JS change.
+        f"<script>window.__EXPECTED_CAMS__ = {json.dumps(expected_cams)};</script>"
         f"<script>{overlays_js}</script>"
         f"<script>{cam_view_js}</script>"
         f"<script>{dashboard_js}</script>"

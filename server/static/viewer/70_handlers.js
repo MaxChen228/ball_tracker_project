@@ -339,7 +339,15 @@
   // axes / detection_blobs) fan out to both cam mounts.
   const CAM_VIEW_LAYERS = new Set(["plate", "axes", "detection_blobs"]);
   const SCENE_LAYERS = new Set(["rays", "traj", "fit"]);
-  const CAM_IDS = ["A", "B"];
+  // Derived from the parsed viewer-data scene (`DATA` is the IIFE-
+  // scoped JSON parsed at 00_boot.js) so an N-camera session fans out
+  // layer toggles to every camera in the rig automatically. Missing /
+  // empty scene cameras is a server-side bug, not a runtime fallback
+  // case — let the page break loud rather than silently no-op.
+  if (!Array.isArray(DATA.scene && DATA.scene.cameras) || !DATA.scene.cameras.length) {
+    throw new Error('viewer bootstrap: scene.cameras missing/empty');
+  }
+  const CAM_IDS = DATA.scene.cameras.map(c => c.camera_id);
   layerToggles.addEventListener("change", (e) => {
     const cb = e.target.closest(".layer-checkbox[data-layer]");
     if (!cb) return;

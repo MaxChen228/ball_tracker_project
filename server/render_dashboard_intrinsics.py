@@ -30,7 +30,12 @@ import datetime as _dt
 import html
 
 
-_ROLES = ("A", "B")
+def _roles() -> tuple[str, ...]:
+    """Camera roles the intrinsics card should render rows for. Single
+    source of truth is `State.expected_camera_ids()` — adding a third
+    camera to the rig grows the pairing table without code changes."""
+    from main import state  # local import: avoid circular at module load
+    return tuple(state.expected_camera_ids())
 
 
 def _fmt_dev_id(device_id: str) -> str:
@@ -85,7 +90,7 @@ def _render_pairing(
 ) -> str:
     """Always render both Cam A and Cam B rows. Missing role = offline."""
     rows: list[str] = []
-    for role in _ROLES:
+    for role in _roles():
         info = online_roles.get(role)
         rows.append(_render_pairing_row(role, info, record_by_device))
     return (

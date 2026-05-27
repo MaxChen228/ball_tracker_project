@@ -361,7 +361,10 @@ def _render_session_body(
             cls, tip = "waiting", f"{cam}: waiting"
         return f'<span class="sync-led {cls}" title="{html.escape(tip)}">{cam}</span>'
 
-    sync_leds = _sync_led_html("A") + _sync_led_html("B")
+    # Iterate over the rig's configured cameras so a third camera grows
+    # the LED strip without code changes.
+    from main import state  # local: avoid circular at module load
+    sync_leds = "".join(_sync_led_html(cam) for cam in state.expected_camera_ids())
 
     gate_row = ""
     if not armed and missing:

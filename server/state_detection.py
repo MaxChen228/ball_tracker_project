@@ -75,6 +75,10 @@ def ingest_live_frame(
                     state._detection_config
                 )
             )
+        # TODO(n-camera): generalize to iterate state.expected_camera_ids()
+        # once `triangulate_live` (below) accepts an N-pose dict. Today
+        # the hot path is pair-based (Phase 3 live_pairing peer-set
+        # change documented this contract).
         cal_a = state._calibration_store.get("A")
         cal_b = state._calibration_store.get("B")
         dev_a = state._device_registry.get("A")

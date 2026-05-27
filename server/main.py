@@ -349,7 +349,11 @@ def _arm_readiness(
             if len(ids) > 1:
                 blockers.append("time sync ids mismatch — re-run mutual sync")
     else:
-        missing = [cam for cam in ("A", "B") if cam not in usable]
+        # Single-camera session: report which expected cams are absent
+        # against the rig's configured camera list. With a 2-cam rig
+        # this is still {"A","B"}; an N-cam rig grows the comparison.
+        expected_cams = state.expected_camera_ids()
+        missing = [cam for cam in expected_cams if cam not in usable]
         if missing:
             warnings.append(
                 f"single-camera session ({usable[0]}); no triangulation"

@@ -19,6 +19,7 @@ def test_dashboard_scene_hookup_rehydrates_selection_after_layer_mount():
         overlays_js="",
         cam_view_js="",
         dashboard_js="",
+        expected_cams=["A", "B"],
         trash_count=0,
     )
     assert 'setupDashboardLayers(window.BallTrackerScene);' in html

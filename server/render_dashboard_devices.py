@@ -283,6 +283,14 @@ def _render_device_rows(
             f"</div>"
         )
 
-    rows = [render_row(cam) for cam in ("A", "B")]
-    rows.extend(render_row(str(d["camera_id"])) for d in devices if d["camera_id"] not in ("A", "B"))
+    # Iterate the rig's configured cameras first, then surface any
+    # extras that registered with an id outside that set (legacy /
+    # third-phone-mid-rollout case).
+    from main import state  # local: avoid circular at module load
+    expected = state.expected_camera_ids()
+    rows = [render_row(cam) for cam in expected]
+    rows.extend(
+        render_row(str(d["camera_id"])) for d in devices
+        if d["camera_id"] not in expected
+    )
     return f'<div class="devices-grid">{"".join(rows)}</div>'

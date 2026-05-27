@@ -1,5 +1,15 @@
 // === page mode + dom refs + globals ===
-  const EXPECTED = ['A', 'B'];
+  // Camera roles the dashboard renders slots for. Injected by the SSR
+  // (`render_dashboard_html` writes `window.__EXPECTED_CAMS__` from
+  // `state.expected_camera_ids()`). Frozen here so subsequent code can
+  // treat it as a constant for the lifetime of the page; a rig
+  // reconfiguration requires a page reload to refresh.
+  // Cold-failure: missing the global is a server-side template bug,
+  // not a runtime fallback condition — let the page break loud.
+  if (!Array.isArray(window.__EXPECTED_CAMS__)) {
+    throw new Error('dashboard bootstrap: window.__EXPECTED_CAMS__ missing/invalid');
+  }
+  const EXPECTED = Object.freeze(window.__EXPECTED_CAMS__.slice());
   const pageMode = document.body?.dataset.page || '';
   const setupCompareMode = pageMode === 'setup';
 

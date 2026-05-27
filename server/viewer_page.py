@@ -141,15 +141,19 @@ def build_viewer_page_context(
     videos_flex = "1 1 0"
 
     videos_by_cam = {cam: (url, off) for cam, url, off, _fps, _fr in videos if url}
-    other_cam = {"A": "B", "B": "A"}
     cams_by_id = {c.camera_id: c for c in scene.cameras}
+    # Iterate this session's cameras (sorted) so the grid scales with
+    # a rig of any size. `never_coming` flips true for a cam that has
+    # NO video on disk while ANY peer DOES — i.e. the user is looking
+    # at a partial upload and this cell will stay empty forever.
+    session_cam_ids = sorted(health["cameras"].keys())
     video_cells = "".join(
         video_cell_html(
             cam,
             videos_by_cam.get(cam),
             never_coming=(
                 cam not in videos_by_cam
-                and other_cam[cam] in videos_by_cam
+                and any(peer in videos_by_cam for peer in session_cam_ids if peer != cam)
                 and not health["cameras"][cam]["received"]
             ),
             image_width_px=(cams_by_id[cam].image_width_px if cam in cams_by_id else None),
@@ -157,14 +161,13 @@ def build_viewer_page_context(
             cx=(cams_by_id[cam].cx if cam in cams_by_id else None),
             cy=(cams_by_id[cam].cy if cam in cams_by_id else None),
         )
-        for cam in ("A", "B")
+        for cam in session_cam_ids
     )
 
-    cam_a_received = health["cameras"]["A"]["received"]
-    cam_b_received = health["cameras"]["B"]["received"]
-    if cam_a_received and cam_b_received:
+    received_cams = [c for c in session_cam_ids if health["cameras"][c]["received"]]
+    if len(received_cams) == len(session_cam_ids) and session_cam_ids:
         layout_mode = "paired"
-    elif cam_a_received or cam_b_received:
+    elif received_cams:
         layout_mode = "single-cam"
     else:
         layout_mode = "empty"
@@ -177,7 +180,7 @@ def build_viewer_page_context(
         counts = (cam.get("counts_by_path") or {}).get("server_post") or {}
         return int(counts.get("total") or 0)
 
-    server_post_ran = any(_server_post_count(c) > 0 for c in ("A", "B"))
+    server_post_ran = any(_server_post_count(c) > 0 for c in session_cam_ids)
     # Drop the `not server_post_ran` gate — the operator may want to
     # rerun after tweaking HSV / shape gate / selector tuning. The button
     # label flips to "Rerun" once a previous run is detected.

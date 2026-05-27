@@ -109,5 +109,6 @@ def render_events_index_html(
         overlays_js=OVERLAYS_RUNTIME_JS,
         cam_view_js=CAM_VIEW_RUNTIME_JS,
         dashboard_js=_JS_TEMPLATE,
+        expected_cams=state.expected_camera_ids(),
         trash_count=trash_count,
     )

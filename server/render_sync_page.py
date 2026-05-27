@@ -33,6 +33,10 @@ def _render_sync_body(
     session_armed = session is not None and session.get("armed")
     syncing = sync is not None
     online_ids = {d.get("camera_id") for d in devices}
+    # Mutual sync is pair-wise (chirp exchange between exactly 2
+    # phones), so "ready to start" still requires both A + B online
+    # even when the rig grows to ≥ 3 cameras. N-way sync topology is
+    # a future phase.
     both_online = "A" in online_ids and "B" in online_ids
     cooling = cooldown_remaining_s > 0.0
     disabled = syncing or session_armed or not both_online or cooling

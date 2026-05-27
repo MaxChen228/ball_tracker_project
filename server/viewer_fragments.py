@@ -324,9 +324,12 @@ def health_nav_strip_html(health: dict) -> str:
     elif mode == "live_only":
         meta_bits.append('<span class="hs-mode">live-only</span>')
 
+    # Iterate the session's cameras (sorted lexically for stable
+    # ordering) rather than a hardcoded A/B pair so a viewer rendered
+    # for a future N-camera session grows the strip without code changes.
     cams_html = "".join(
         cam_strip_chip_html(cam_id, health["cameras"][cam_id])
-        for cam_id in ("A", "B")
+        for cam_id in sorted(health["cameras"].keys())
     )
     return (
         f'<div class="health-strip" role="status" aria-label="Session health">'
@@ -413,20 +416,23 @@ def failure_strip_html(health: dict) -> str:
     tri_n = health.get("triangulated_count", 0)
     server_err = health.get("error")
     reasons: list[str] = []
-    missing = [c for c in ("A", "B") if not cams[c]["received"]]
+    # Iterate this session's cameras (sorted) rather than a hardcoded
+    # A/B pair so failure diagnostics adapt to an N-camera rig.
+    cam_ids = sorted(cams.keys())
+    missing = [c for c in cam_ids if not cams[c]["received"]]
     if missing:
         reasons.append(
             f"{' + '.join('Cam ' + c for c in missing)} never uploaded "
             f"— triangulation skipped"
         )
     else:
-        uncal = [c for c in ("A", "B") if not cams[c]["calibrated"]]
+        uncal = [c for c in cam_ids if not cams[c]["calibrated"]]
         if uncal:
             reasons.append(
                 f"{' + '.join('Cam ' + c for c in uncal)} missing calibration "
                 f"(intrinsics or homography) — run Calibration screen"
             )
-        unsyn = [c for c in ("A", "B") if not cams[c]["time_synced"]]
+        unsyn = [c for c in cam_ids if not cams[c]["time_synced"]]
         if unsyn:
             reasons.append(
                 f"{' + '.join('Cam ' + c for c in unsyn)} has no chirp anchor "
@@ -434,12 +440,12 @@ def failure_strip_html(health: dict) -> str:
             )
         if server_err:
             reasons.append(f"server error: {server_err}")
-        elif tri_n == 0 and all(cams[c]["received"] for c in ("A", "B")):
+        elif tri_n == 0 and all(cams[c]["received"] for c in cam_ids):
             def _any_detected_across_paths(cam: dict) -> bool:
                 counts = cam.get("counts_by_path") or {}
                 return any((counts.get(k) or {}).get("detected", 0) > 0
                            for k in ("live", "server_post"))
-            no_detect = [c for c in ("A", "B") if not _any_detected_across_paths(cams[c])]
+            no_detect = [c for c in cam_ids if not _any_detected_across_paths(cams[c])]
             if no_detect:
                 # `no_detect` stands on its own — fires regardless of mode,
                 # because zero detections across both paths is a real
