@@ -360,8 +360,16 @@ class SyncCoordinator:
         # deep merge that pydantic doesn't perform.
         times = dict(result.times_by_role)
         traces = dict(result.traces_by_role)
-        existing_times = times.get(report.role) or RoleSyncTimes()
-        existing_traces = traces.get(report.role) or RoleSyncTraces()
+        # Explicit None-branch instead of `dict.get(...) or default()`
+        # so a stored RoleSyncTimes with all-None fields (legitimate
+        # partial-report state) doesn't silently get replaced by a
+        # fresh empty instance — CLAUDE.md 禁 `a or b` fallback.
+        existing_times = times.get(report.role)
+        if existing_times is None:
+            existing_times = RoleSyncTimes()
+        existing_traces = traces.get(report.role)
+        if existing_traces is None:
+            existing_traces = RoleSyncTraces()
         time_updates: dict[str, Any] = {}
         if report.t_self_s is not None:
             time_updates["t_self_s"] = report.t_self_s

@@ -82,8 +82,17 @@ def _mutual_math(last_sync: dict[str, Any]) -> dict[str, Any] | None:
     """
     def _f(role: str, key: str) -> float | None:
         # times_by_role keys are camera_ids; today the rig still uses
-        # "A" / "B" but the dict shape is forward-compat.
-        entry = (last_sync.get("times_by_role") or {}).get(role) or {}
+        # "A" / "B" but the dict shape is forward-compat. Explicit
+        # type-check + None-branch instead of `or {}` short-circuit so
+        # an entry-present-but-empty state is distinguishable from
+        # entry-missing (avoids silent-fallback red line — CLAUDE.md
+        # 禁 `a or b` pattern).
+        times = last_sync.get("times_by_role")
+        if not isinstance(times, dict):
+            return None
+        entry = times.get(role)
+        if not isinstance(entry, dict):
+            return None
         v = entry.get(key)
         try:
             return float(v) if v is not None else None
