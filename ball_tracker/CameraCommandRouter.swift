@@ -104,19 +104,32 @@ final class CameraCommandRouter {
                 self.deps.applyMutualSync(sid, emitAtS, recordDurationS)
             }
         case "sync_command":
-            if let cmd = message["command"] as? String, cmd == "start" {
-                DispatchQueue.main.async {
-                    guard let syncId = message["sync_command_id"] as? String else { return }
-                    let state = self.deps.getState()
-                    // Accept new sync_command from .standby OR from
-                    // .timeSyncWaiting (operator re-fired Quick chirp
-                    // before the prior 15 s timeout expired). beginTimeSync
-                    // cancels the old timeout work and resets pending+anchor
-                    // so the swap is clean. Reject during .recording /
-                    // .mutualSyncing — those states own the audio pipeline.
-                    guard state == .standby || state == .timeSyncWaiting else { return }
-                    self.deps.startTimeSync(syncId)
-                }
+            // server lockstep: every sync_command WS push carries
+            // {command, sync_command_id}. Missing/unknown values are
+            // schema drift, not legacy variants — atomic-drop and fail
+            // loud, same pattern as sync_run above.
+            guard let cmd = message["command"] as? String else {
+                commandLog.error("ws sync_command missing required field command")
+                return
+            }
+            guard cmd == "start" else {
+                commandLog.error("ws sync_command unknown command=\(cmd, privacy: .public) — atomic-drop")
+                return
+            }
+            guard let syncId = message["sync_command_id"] as? String else {
+                commandLog.error("ws sync_command cmd=start missing required field sync_command_id")
+                return
+            }
+            DispatchQueue.main.async {
+                let state = self.deps.getState()
+                // Accept new sync_command from .standby OR from
+                // .timeSyncWaiting (operator re-fired Quick chirp
+                // before the prior 15 s timeout expired). beginTimeSync
+                // cancels the old timeout work and resets pending+anchor
+                // so the swap is clean. Reject during .recording /
+                // .mutualSyncing — those states own the audio pipeline.
+                guard state == .standby || state == .timeSyncWaiting else { return }
+                self.deps.startTimeSync(syncId)
             }
         case "arm":
             if let sid = message["sid"] as? String {
