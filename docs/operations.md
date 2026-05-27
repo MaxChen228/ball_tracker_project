@@ -12,7 +12,7 @@ Nominal rig used by the operator — actual per-session pose still comes from th
 - **Extrinsics** are NOT assumed from this geometry — homography is recovered per phone via the dashboard's **Auto calibrate** action (server-side ArUco; phone just sends a single frame). The 3 m / 1B-3B numbers are rig targets, not priors fed into code.
 
 For the per-iPhone-model 240 fps capture format breakdown, see
-[iphone_camera_formats.md](iphone_camera_formats.md).
+[reference/iphone-camera-formats.md](reference/iphone-camera-formats.md).
 
 ## Commands
 
