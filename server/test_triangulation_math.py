@@ -155,7 +155,7 @@ def test_persistence_reloads_state_across_process_restart(tmp_path, monkeypatch)
     latest = s2.latest()
     assert latest is not None
     assert latest.session_id == session_id
-    assert latest.camera_a_received and latest.camera_b_received
+    assert latest.cameras_received["A"] and latest.cameras_received["B"]
     assert len(latest.points) == 1
     pt = latest.points[0]
     assert abs(pt.x_m - P_true[0]) < 1e-6

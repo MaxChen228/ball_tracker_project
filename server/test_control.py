@@ -712,8 +712,7 @@ def test_store_result_skips_live_only_session_after_delete(tmp_path):
     # pitches, no results, no live pairing.
     fake_result = SessionResult(
         session_id=sid(902),
-        camera_a_received=False,
-        camera_b_received=False,
+        cameras_received={"A": False, "B": False},
     )
     s.store_result(fake_result)
     assert sid(902) not in s.results

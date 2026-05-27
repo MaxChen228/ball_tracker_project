@@ -226,8 +226,7 @@ def test_stamp_segments_on_result_populates_segments_for_ballistic_input():
         ))
     result = SessionResult(
         session_id="s_seg_test",
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated=pts,
         triangulated_by_algorithm={"v11_hsv_cc": pts},
         algorithms_completed={"v11_hsv_cc"},

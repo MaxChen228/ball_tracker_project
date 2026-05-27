@@ -388,8 +388,7 @@ def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segm
     ]
     result = SessionResult(
         session_id=sid(11),
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         points=tri,
         triangulated=tri,
         segments=segs,
@@ -425,8 +424,7 @@ def test_build_scene_stamps_seg_idx_minus_one_for_out_of_segment_points():
     )]
     result = SessionResult(
         session_id=sid(12),
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         points=tri,
         triangulated=tri,
         segments=segs,
@@ -476,8 +474,7 @@ def test_build_scene_seg_idx_survives_render_distance_filter():
     ]
     result = SessionResult(
         session_id=sid(13),
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         points=tri,
         triangulated=tri,
         segments=segs,

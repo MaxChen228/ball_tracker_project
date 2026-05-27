@@ -48,8 +48,7 @@ def test_legacy_points_no_silent_fallback_to_live_when_server_post_requested():
     live_pt = _make_triangulated_point()
     result = SessionResult(
         session_id="s_deadbeef",
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: [live_pt]},
         algorithms_completed={IOS_CAPTURE_TIME_ALGORITHM_ID},
         # server_post entry absent → simulates "server_post never ran /
@@ -78,8 +77,7 @@ def test_legacy_points_uses_live_only_when_server_post_not_requested():
     live_pt = _make_triangulated_point()
     result = SessionResult(
         session_id="s_deadbeef",
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated_by_algorithm={IOS_CAPTURE_TIME_ALGORITHM_ID: [live_pt]},
         algorithms_completed={IOS_CAPTURE_TIME_ALGORITHM_ID},
     )

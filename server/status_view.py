@@ -25,7 +25,9 @@ def summary(state: "State") -> dict[str, Any]:
         sessions = sorted({sid for _, sid in state.pitches.keys()})
         completed = [
             k for k, r in state.results.items()
-            if r.camera_a_received and r.camera_b_received and not r.error
+            if r.cameras_received
+            and all(r.cameras_received.values())
+            and not r.error
         ]
         return {
             "state": "receiving" if state.pitches else "idle",

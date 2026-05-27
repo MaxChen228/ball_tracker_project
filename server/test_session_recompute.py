@@ -242,8 +242,7 @@ def test_segmenter_filters_input_by_per_algorithm_cost_threshold(monkeypatch):
     )
     result = SessionResult(
         session_id="s_seg_tight",
-        camera_a_received=True,
-        camera_b_received=True,
+        cameras_received={"A": True, "B": True},
         triangulated_by_algorithm={"v99_tight": list(pts)},
         algorithms_completed={"v99_tight"},
         config_used_by_algorithm={"v99_tight": snap},

@@ -979,8 +979,7 @@ class State:
                 )
                 return SessionResult(
                     session_id=sid,
-                    camera_a_received=False,
-                    camera_b_received=False,
+                    cameras_received={"A": False, "B": False},
                     error="session_deleted_during_record",
                 )
             existing = self.pitches.get((cam, sid))
@@ -1072,8 +1071,7 @@ class State:
                 pass
             return SessionResult(
                 session_id=sid,
-                camera_a_received=False,
-                camera_b_received=False,
+                cameras_received={"A": False, "B": False},
                 error="session_deleted_during_record",
             )
         with self._lock:
