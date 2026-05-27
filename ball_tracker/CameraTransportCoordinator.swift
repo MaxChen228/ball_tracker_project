@@ -91,7 +91,35 @@ final class CameraTransportCoordinator: NSObject {
     private var lastServerHeartbeatInterval: Double?
     private var lastServerTrackingExposureCapMode: ServerUploader.TrackingExposureCapMode?
     private var previewRequestedByServer: Bool = false
-    private var calCaptureState: CalCaptureState = .idle
+    /// `calCaptureState` is touched from three queues — main (WS
+    /// CommandRouter), camera.frame.queue (captureOutput → `consume…` /
+    /// `hasPending…`), and camera.session.queue (runtime callback →
+    /// `markCalIdle`). A plain stored prop is not safe across queues, and
+    /// `armCalibrationCapture`'s `guard == .idle` + `= .swappingTo` must
+    /// be atomic — two parallel router pushes could otherwise both see
+    /// `.idle` and double-arm. Mirror of `AtomicUploaderBox` /
+    /// `sessionStateLock` rationale.
+    private let calCaptureStateLock = NSLock()
+    private var _calCaptureState: CalCaptureState = .idle
+
+    private func calStateSnapshot() -> CalCaptureState {
+        calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
+        return _calCaptureState
+    }
+    private func setCalState(_ v: CalCaptureState) {
+        calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
+        _calCaptureState = v
+    }
+    /// Atomic compare-and-set. Returns true iff the prior value matched
+    /// `expect`, in which case the state has been swapped to `new`. Used
+    /// by `armCalibrationCapture` / `consumeCalibrationFrameCaptureRequest`
+    /// so the guard + mutation can't be torn by a concurrent transition.
+    private func compareAndSetCalState(expect: CalCaptureState, new: CalCaptureState) -> Bool {
+        calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
+        guard _calCaptureState == expect else { return false }
+        _calCaptureState = new
+        return true
+    }
 
     init(
         healthMonitor: HeartbeatScheduler,
@@ -111,7 +139,7 @@ final class CameraTransportCoordinator: NSObject {
     }
 
     var isPreviewRequested: Bool { previewRequestedByServer }
-    var hasPendingCalibrationFrameCaptureRequest: Bool { calCaptureState != .idle }
+    var hasPendingCalibrationFrameCaptureRequest: Bool { calStateSnapshot() != .idle }
 
     func connect() {
         guard let baseURL = webSocketURL() else { return }
@@ -166,7 +194,7 @@ final class CameraTransportCoordinator: NSObject {
         previewUploader?.updateUploader(uploader)
         if roleChanged {
             previewUploader = nil
-            calCaptureState = .idle
+            setCalState(.idle)
         }
 
         if endpointChanged || roleChanged {
@@ -195,11 +223,12 @@ final class CameraTransportCoordinator: NSObject {
     /// a state that forbids the swap (recording, time-sync waiting); the
     /// router should drop the request rather than queue it (server retries).
     func armCalibrationCapture(whileIn state: CameraViewController.AppState) -> Bool {
-        guard calCaptureState == .idle,
-              state != .recording,
+        guard state != .recording,
               state != .timeSyncWaiting else { return false }
-        calCaptureState = .swappingTo
-        return true
+        // Atomic guard + transition. Two parallel router pushes both
+        // seeing `.idle` would otherwise both proceed past a non-atomic
+        // `guard == .idle` and double-arm the capture cycle.
+        return compareAndSetCalState(expect: .idle, new: .swappingTo)
     }
 
     /// Frame callback asks: should we kick off the photo-format swap NOW?
@@ -208,11 +237,11 @@ final class CameraTransportCoordinator: NSObject {
     func consumeCalibrationFrameCaptureRequest(
         whileIn state: CameraViewController.AppState
     ) -> Bool {
-        guard calCaptureState == .swappingTo,
-              state != .recording,
+        guard state != .recording,
               state != .timeSyncWaiting else { return false }
-        calCaptureState = .capturing
-        return true
+        // Atomic .swappingTo → .capturing so concurrent frame callbacks
+        // (camera.frame.queue) can't double-fire the photo-format swap.
+        return compareAndSetCalState(expect: .swappingTo, new: .capturing)
     }
 
     /// Runtime advances state to `.idle` when its completion fires —
@@ -220,7 +249,7 @@ final class CameraTransportCoordinator: NSObject {
     /// owns the swap-back internally (rollbackToFormat), so callers
     /// only see two transitions visible at the coordinator boundary:
     /// .swappingTo → .capturing (consume) and .capturing → .idle (mark).
-    func markCalIdle() { calCaptureState = .idle }
+    func markCalIdle() { setCalState(.idle) }
 
     private func webSocketURL() -> URL? {
         guard
@@ -336,7 +365,7 @@ final class CameraTransportCoordinator: NSObject {
                 resetPreviewUploader: { [weak self] in self?.previewUploader?.reset() },
                 startStandbyCapture: { [weak self] in self?.dependencies.startStandbyCapture() },
                 stopCapture: { [weak self] in self?.dependencies.stopCapture() },
-                getCalCaptureState: { [weak self] in self?.calCaptureState ?? .idle },
+                getCalCaptureState: { [weak self] in self?.calStateSnapshot() ?? .idle },
                 armCalibrationCapture: { [weak self] in
                     guard let self else { return false }
                     return self.armCalibrationCapture(whileIn: self.dependencies.getState())

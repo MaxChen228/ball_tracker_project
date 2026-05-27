@@ -22,7 +22,6 @@ final class CameraSyncCoordinator {
         let reconcileStandbyCaptureState: () -> Void
         let transitionState: (CameraViewController.AppState) -> Void
         let setStatusText: (String) -> Void
-        let showErrorBanner: (String) -> Void
         let hideBanner: () -> Void
         let flashErrorBanner: (String, TimeInterval) -> Void
         let refreshUI: () -> Void
@@ -33,7 +32,6 @@ final class CameraSyncCoordinator {
 
     private var lastSyncAnchor: RecoveredAnchor?
     private var pendingTimeSyncId: String?
-    private var timeSyncClaimGeneration: Int = 0
     private var timeSyncTimeoutWork: DispatchWorkItem?
 
     private var syncAudio: MutualSyncAudio?
@@ -57,35 +55,17 @@ final class CameraSyncCoordinator {
         deps.healthMonitor()?.updateTimeSyncId(nil)
     }
 
-    func startTimeSync(syncId: String? = nil) {
-        if let syncId {
-            beginTimeSync(syncId: syncId)
-            return
-        }
-        timeSyncClaimGeneration &+= 1
-        let generation = timeSyncClaimGeneration
-        deps.uploader().claimTimeSyncIntent { [weak self] result in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                guard generation == self.timeSyncClaimGeneration else { return }
-                guard self.deps.getState() == .standby else { return }
-                switch result {
-                case .success(let response):
-                    self.beginTimeSync(syncId: response.sync_id)
-                case .failure(let error):
-                    syncLog.error("time-sync claim failed cam=\(self.deps.getCameraRole(), privacy: .public) err=\(error.localizedDescription, privacy: .public)")
-                    self.pendingTimeSyncId = nil
-                    self.deps.showErrorBanner("無法取得同步識別碼：檢查伺服器連線")
-                    self.deps.setStatusText("時間校正失敗 · sync id")
-                    self.deps.refreshUI()
-                }
-            }
-        }
+    func startTimeSync(syncId: String) {
+        // server is the single source of truth for sync_id — every
+        // caller is the WS `sync_command` dispatch (via CommandRouter /
+        // TransportCoordinator / VC), and `sync_command` only fires after
+        // the server has already minted the id. The legacy nil-arg path
+        // that POSTed `/sync/claim` to mint client-side is dead.
+        beginTimeSync(syncId: syncId)
     }
 
     func cancelTimeSync(reason: String = "cancelled") {
         syncLog.info("camera cancel time-sync reason=\(reason, privacy: .public) cam=\(self.deps.getCameraRole(), privacy: .public)")
-        timeSyncClaimGeneration &+= 1
         timeSyncTimeoutWork?.cancel()
         timeSyncTimeoutWork = nil
         deps.chirpDetector()?.onChirpDetected = nil

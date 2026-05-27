@@ -523,7 +523,6 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 reconcileStandbyCaptureState: { [weak self] in self?.reconcileStandbyCaptureState() },
                 transitionState: { [weak self] newState in self?.transitionSyncState(to: newState) },
                 setStatusText: { [weak self] text in self?.lastUploadStatusText = text },
-                showErrorBanner: { [weak self] text in self?.showErrorBanner(text) },
                 hideBanner: { [weak self] in self?.hideBanner() },
                 flashErrorBanner: { [weak self] text, duration in
                     self?.flashErrorBanner(text, duration: duration)
