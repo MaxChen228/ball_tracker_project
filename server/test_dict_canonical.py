@@ -325,6 +325,10 @@ def test_persist_result_json_drops_flat_keys_from_disk_payload():
     assert parsed["active_server_post_algorithm_id"] == "v11_hsv_cc"
     assert "v11_hsv_cc" in parsed["triangulated_by_algorithm"]
     assert "v11_hsv_cc" in parsed["algorithms_completed"]
+    # cameras_received is the camera_id-keyed dict — explicit shape lock.
+    assert parsed["cameras_received"] == {"A": True, "B": True}
+    assert "camera_a_received" not in parsed
+    assert "camera_b_received" not in parsed
     # Reload — flat surfaces project from dict via computed_field.
     r2 = SessionResult.model_validate_json(blob)
     assert "server_post" in r2.triangulated_by_path
