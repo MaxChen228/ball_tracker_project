@@ -4,7 +4,7 @@
 
 - **World frame** (from iPhone calibration): X = plate left/right, Y = plate depth (front→back, pitcher→catcher), Z = plate normal (up). Plate plane is Z=0.
 - **Camera frame** (OpenCV pinhole): X = image right, Y = image down, Z = optical axis.
-- **Intrinsics naming**: server + iOS both use `fy` for the image-vertical focal length. The legacy `fz` field name (a historical collision from early iOS code) has been retired; `IntrinsicsPayload` still accepts `fz` as a read-time alias on `model_validate` so historical `data/calibrations/*.json` and old pitch JSONs still load cleanly. New code writes `fy`.
+- **Intrinsics naming**: server + iOS both use `fy` for the image-vertical focal length. The legacy `fz` field name (a historical collision from early iOS code) has been **fully retired** (migration script removed 2026-04-29; see comment at `server/schemas.py:50`). `IntrinsicsPayload` no longer accepts `fz` — any on-disk `data/calibrations/*.json` or old pitch JSON that still carries `fz` will **422 / fail to load**. New code must write `fy`.
 - **iOS side**: no longer persists intrinsics — ChArUco intrinsics are server-owned per device id under `data/calibrations/<cam>.json` (Phase 1 decoupling). The `intrinsic_*` UserDefaults keys referenced in older docs no longer exist in this codebase.
 
 ## Payload contract
@@ -99,7 +99,7 @@ The captured `DetectionConfigSnapshotPayload(algorithm_id, params, preset_name)`
 
 ### `POST /sessions/{sid}/run_server_post` (deprecation alias)
 
-Kept for the HTML form callers (events-row "Run srv" button and viewer "Rerun server" button) which submit `preset_name` only. Behaviour is identical to the primary endpoint's preset path: the snapshot's `algorithm_id` is derived from `preset.algorithm_id`, then the same `_dispatch_server_post` runs. 422 on missing `preset_name`, 404 on unknown preset. Response shape matches the primary endpoint.
+Kept for the viewer's "Rerun server" HTML form caller which submits `preset_name` only (PR #125 removed the events-row "Run srv" form from the dashboard chip strip — re-runs are viewer-only now). Behaviour is identical to the primary endpoint's preset path: the snapshot's `algorithm_id` is derived from `preset.algorithm_id`, then the same `_dispatch_server_post` runs. 422 on missing `preset_name`, 404 on unknown preset. Response shape matches the primary endpoint.
 
 ### `POST /sessions/{sid}/active_run` — flip active server_post pointer
 
@@ -207,7 +207,7 @@ cam: str                             # camera_id of the cam that was just (re-)c
 
 ### iOS → Server
 
-All inbound messages are JSON; `device_ws.note_seen` updates the cam's last-seen timestamp on every recognised message. Unknown `type` values are silently dropped (no `or fallback` — they just skip every branch).
+All inbound messages are JSON; `device_ws.note_seen` updates the cam's last-seen timestamp on every recognised message. Unknown `type` values **fail loud** — `routes/device_ws.py` raises `ValueError` and closes the WS socket so a schema drift is impossible to miss (regression test: `server/test_device_ws_unknown_mtype.py`; invariant also documented in `CLAUDE.md` WS-only checklist §4). Do not reintroduce a silent-drop branch when adding new message types — register the new `type` explicitly in the dispatch table.
 
 #### `type: "hello"` — connection greeting
 
@@ -323,9 +323,9 @@ data: {
 #### `event: server_post_done`
 
 Terminal event broadcast once the BackgroundTask finishes (success **or**
-cancellation). Dashboard events row switches the `[Cancel]` button back to
-`[Run srv]` and reloads the session row; viewer "Rerun server" button
-re-enables.
+cancellation). Dashboard events row hides the in-flight `[Cancel]` button
+and reloads the session row (PR #125 removed the events-row "Run srv" form —
+re-runs are viewer-only now); viewer "Rerun server" button re-enables.
 
 ```
 event: server_post_done

@@ -12,9 +12,10 @@ Also supports:
   uv run python calibrate_intrinsics.py --print-board --out board.png
     → writes a ChArUco board PNG you can print on A4 (at 1:1 scale!).
 
-The resulting intrinsics.json holds fx/fy/cx/cy that can be pasted into the
-iOS app's Settings → Manual Intrinsics fields to replace the FOV approximation
-that the app otherwise derives from AVCaptureDevice.
+The resulting intrinsics.json holds fx/fy/cx/cy consumed server-side via
+`DeviceIntrinsicsStore` (data/calibrations/<cam>.json is authoritative).
+iOS no longer has a Manual Intrinsics UI — Phase 6 deleted in-app
+calibration entirely; intrinsics flow server → iOS via WS settings push.
 """
 from __future__ import annotations
 
@@ -234,7 +235,6 @@ def main(argv: list[str] | None = None) -> int:
         f"fx={result.fx:.1f}  fy={result.fy:.1f}  cx={result.cx:.1f}  cy={result.cy:.1f}"
     )
     print(f"→ {args.out}")
-    print("Paste fx/fy/cx/cy into iOS Settings → Manual Intrinsics.")
     return 0
 
 

@@ -288,63 +288,6 @@ final class ServerUploader: @unchecked Sendable {
 
 
 
-    struct TimeSyncClaimResponse: Codable {
-        let ok: Bool
-        let sync_id: String
-        let started_at: Double
-        let expires_at: Double
-    }
-
-    /// Claim the currently-live legacy chirp sync run id from the server,
-    /// minting a fresh one when the previous listening window expired.
-    /// Both phones calling this within the same window receive the same
-    /// `sync_id`, which is what lets their third-device chirp anchors be
-    /// proven to belong to the same event.
-    func claimTimeSyncIntent(
-        completion: @escaping (Result<TimeSyncClaimResponse, Error>) -> Void
-    ) {
-        guard let base = config.baseURL() else {
-            completion(.failure(NSError(
-                domain: "ServerUploader",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
-            )))
-            return
-        }
-        let url = base.appendingPathComponent("sync/claim")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                completion(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: http.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "HTTP status \(http.statusCode)"]
-                )))
-                return
-            }
-            guard let data else {
-                completion(.failure(NSError(
-                    domain: "ServerUploader",
-                    code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "Empty response"]
-                )))
-                return
-            }
-            do {
-                completion(.success(try JSONDecoder().decode(TimeSyncClaimResponse.self, from: data)))
-            } catch {
-                completion(.failure(error))
-            }
-        }
-        task.resume()
-    }
-
     /// Generic "POST raw bytes as Content-Type: image/jpeg" used by
     /// `PreviewUploader` (Phase 4a). Not tied to a specific endpoint —
     /// the caller provides the path so this can grow to support other

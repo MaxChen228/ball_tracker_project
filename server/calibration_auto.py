@@ -242,7 +242,6 @@ def _solve_pnp_homography(
     detected: list[Any],
     *,
     intrinsics: IntrinsicsPayload,
-    image_size: tuple[int, int],
 ) -> tuple[list[float], list[int]] | None:
     import cv2  # noqa: WPS433
 
@@ -505,7 +504,7 @@ def _solve_auto_cal_solution(
         detected, world_map, image_size=image_size
     )
     pnp_solution = _solve_pnp_homography(
-        detected, intrinsics=intrinsics, image_size=image_size
+        detected, intrinsics=intrinsics
     )
     if pnp_solution is None:
         return planar, "planar_homography", []

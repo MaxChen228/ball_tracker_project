@@ -23,9 +23,11 @@ from triangulate import (
 
 logger = logging.getLogger(__name__)
 
-# Pairing window between A/B anchor-relative timestamps. 8.33 ms ≈ one frame at
-# 240 fps; override via `BALL_TRACKER_MAX_DT_S` env var (in seconds) to widen
-# the window for field diagnostics without recompiling.
+# Pairing window between A/B anchor-relative timestamps. 8.33 ms ≈ two
+# frames at 240 fps (one frame at 120 fps); chosen so timestamp jitter
+# of ±1.67 ms (MOV time_base 1/600) on each side still admits the
+# matching frame. Override via `BALL_TRACKER_MAX_DT_S` env var (seconds)
+# to widen the window for field diagnostics without recompiling.
 _DEFAULT_MAX_DT_S = 1.0 / 120.0
 _MAX_DT_S = float(os.environ.get("BALL_TRACKER_MAX_DT_S", _DEFAULT_MAX_DT_S))
 
@@ -106,6 +108,15 @@ def scale_pitch_to_video_dims(
     ref_w, ref_h = calibration_dims
     if ref_w <= 0 or ref_h <= 0:
         return pitch
+    ref_ar = ref_w / ref_h
+    mov_ar = pitch.image_width_px / pitch.image_height_px
+    if abs(ref_ar - mov_ar) / ref_ar > 0.02:
+        raise ValueError(
+            f"calibration AR mismatch camera={pitch.camera_id} session={pitch.session_id} "
+            f"calib={ref_w}x{ref_h} (ar={ref_ar:.3f}) "
+            f"video={pitch.image_width_px}x{pitch.image_height_px} (ar={mov_ar:.3f}) "
+            "— recalibrate at the MOV's resolution before triangulating"
+        )
     if ref_w == pitch.image_width_px and ref_h == pitch.image_height_px:
         # No scaling needed, but still sanity-check the intrinsics that
         # will actually drive triangulation — catches the dims-match-but-

@@ -58,7 +58,6 @@ def detect_pitch(
     running the blue-ball preset would corrupt every comparison. Every
     caller threads its explicit config through.
     """
-    hsv = hsv_range
     logger.info("detect_pitch video=%s", video_path.name)
     out: list[FramePayload] = []
     for idx, (absolute_pts_s, bgr) in enumerate(frame_iter(video_path, video_start_pts_s)):
@@ -72,15 +71,15 @@ def detect_pitch(
             # caller decide what to coalesce.
             progress(idx)
         winner, blobs = detect_ball_with_candidates(
-            bgr, hsv,
+            bgr, hsv_range,
             shape_gate=shape_gate,
         )
         out.append(
             FramePayload(
                 frame_index=idx,
                 timestamp_s=absolute_pts_s,
-                px=winner.px if winner else None,
-                py=winner.py if winner else None,
+                px=winner.px if winner is not None else None,
+                py=winner.py if winner is not None else None,
                 ball_detected=winner is not None,
                 # Always pass through the actual blobs list. Empty list
                 # ("detector ran, found 0 candidates") must not collapse
@@ -93,6 +92,6 @@ def detect_pitch(
     logger.info(
         "detection video=%s frames=%d ball=%d hsv=h[%d-%d]s[%d-%d]v[%d-%d]",
         video_path.name, len(out), ball_frames,
-        hsv.h_min, hsv.h_max, hsv.s_min, hsv.s_max, hsv.v_min, hsv.v_max,
+        hsv_range.h_min, hsv_range.h_max, hsv_range.s_min, hsv_range.s_max, hsv_range.v_min, hsv_range.v_max,
     )
     return out
