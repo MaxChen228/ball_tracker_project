@@ -12,6 +12,7 @@ def test_dashboard_scene_hookup_rehydrates_selection_after_layer_mount():
         tuning_html="",
         strike_zone_html="",
         intrinsics_html="",
+        device_pool_html="",
         events_html="",
         scene_div='<div id="scene-root"></div>',
         scene_runtime_html="",

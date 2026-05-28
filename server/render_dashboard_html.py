@@ -29,6 +29,7 @@ def render_dashboard_html(
     tuning_html: str,
     strike_zone_html: str,
     intrinsics_html: str,
+    device_pool_html: str,
     events_html: str,
     scene_div: str,
     scene_runtime_html: str,
@@ -113,6 +114,10 @@ def render_dashboard_html(
         '<div class="card" data-collapsible-key="dash:card:intrinsics">'
         '<h2 class="card-title" data-collapsible-header>Intrinsics (ChArUco)</h2>'
         f'<div id="intrinsics-body" data-collapsible-body>{intrinsics_html}</div>'
+        "</div>"
+        '<div class="card" data-collapsible-key="dash:card:device-pool">'
+        '<h2 class="card-title" data-collapsible-header>Device Pool</h2>'
+        f'<div id="device-pool-body" data-collapsible-body>{device_pool_html}</div>'
         "</div>"
         '<div class="card">'
         '<div class="events-toolbar">'

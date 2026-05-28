@@ -7,6 +7,7 @@
   tickCalibration();
   tickEvents();
   tickIntrinsics();
+  tickDevicePool();
   // /status polling is now a safety fallback — SSE `device_status` and
   // `device_heartbeat` drive the Devices card in real-time. 5 s covers
   // SSE reconnect gaps without spamming the server at 1 Hz.
@@ -18,6 +19,7 @@
   // just adds load without UX gain when SSE is up.
   setInterval(tickEvents, 15000);
   setInterval(tickIntrinsics, 5000);
+  setInterval(tickDevicePool, 5000);
   // Re-check the degraded banner without waiting for a new device_status
   // event — the grace window ticks forward even when no events arrive,
   // so the banner needs its own cadence to flip on at the right moment.

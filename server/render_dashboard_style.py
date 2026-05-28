@@ -614,6 +614,38 @@ button.btn.preview-btn.active {{ background: var(--passed); color: var(--surface
 .intrinsics-pair .pair-state {{ font-size: 10px; letter-spacing: 0.10em;
                                 text-transform: uppercase; }}
 .intrinsics-pair .chip.small {{ margin-left: auto; }}
+
+/* --- Device Pool card (multi-camera rig assignment) ---
+   One row per persistent device_uuid → camera_id assignment + one row
+   per online-but-unassigned phone (operator's promotion candidates). */
+.device-pool-empty {{ font-size: 11px; padding: 4px 6px; }}
+.device-pool-section {{ display: flex; flex-direction: column; gap: 3px;
+                        margin-top: 6px; }}
+.device-pool-section:first-child {{ margin-top: 0; }}
+.device-pool-section-title {{ font-size: 10px; letter-spacing: 0.10em;
+                              text-transform: uppercase; color: var(--sub); }}
+.device-pool-rows {{ display: flex; flex-direction: column; gap: 4px; }}
+.device-pool-row {{ display: flex; align-items: center; gap: 6px;
+                    font-family: var(--mono); font-size: 11px;
+                    padding: 4px 6px; border-radius: var(--r);
+                    background: var(--surface); flex-wrap: wrap; }}
+.device-pool-row.observed {{ background: rgba(230, 145, 40, 0.10); }}
+.device-pool-row .pool-cam {{ font-weight: 600; color: var(--ink);
+                              letter-spacing: 0.04em; min-width: 44px; }}
+.device-pool-row .pool-cam-current {{ font-size: 10px; letter-spacing: 0.04em;
+                                       color: var(--sub); min-width: 88px; }}
+.device-pool-row .pool-arrow {{ color: var(--sub); }}
+.device-pool-row .pool-uuid {{ font-weight: 500; color: var(--ink); }}
+.device-pool-row .pool-model {{ font-size: 10px; color: var(--sub); }}
+.device-pool-row .chip.small {{ margin-left: auto; }}
+.device-pool-row .pool-action {{ font-family: var(--mono); font-size: 10px;
+                                  padding: 2px 8px; border-radius: var(--r);
+                                  border: 1px solid var(--border-base);
+                                  background: var(--surface); cursor: pointer;
+                                  margin-left: 4px; }}
+.device-pool-row .pool-action:hover:not(:disabled) {{ background: var(--surface-2); }}
+.device-pool-row .pool-action:disabled {{ opacity: 0.5; cursor: wait; }}
+
 /* --- View-preset toolbar (ISO/CATCH/SIDE/TOP/PITCHER) — pinned top-left
    over the 3D scene. Mirrors viewer's `.scene-col .scene-views` styling
    so the two surfaces read identically. */

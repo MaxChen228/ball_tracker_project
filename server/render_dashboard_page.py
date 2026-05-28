@@ -12,6 +12,7 @@ from typing import Any
 from render_dashboard_client import _JS_TEMPLATE
 from render_dashboard_events import _render_events_body
 from render_dashboard_html import render_dashboard_html as _render_dashboard_html
+from render_dashboard_device_pool import _render_device_pool_body
 from render_dashboard_intrinsics import _render_intrinsics_body
 from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
@@ -94,6 +95,34 @@ def render_events_index_html(
         for dev in state.online_devices()
     }
     intrinsics_html = _render_intrinsics_body(intrinsics_records, online_roles)
+    # Device Pool SSR. Same shape /devices/pool returns; client tick
+    # refreshes from the endpoint every 5 s. Initial paint keeps the
+    # card from flashing empty when the operator opens the dashboard
+    # with assignments already on disk.
+    device_pool_assignments = [
+        {
+            "device_uuid": rec.device_uuid,
+            "camera_id": rec.camera_id,
+            "device_model": rec.device_model,
+            "assigned_at": rec.assigned_at,
+            "online": False,  # Initial paint; live online flag arrives via tick.
+        }
+        for rec in state.device_assignments()
+    ]
+    _assigned_uuids = {a["device_uuid"] for a in device_pool_assignments}
+    device_pool_observed = [
+        {
+            "device_uuid": dev.device_id,
+            "camera_id": dev.camera_id,
+            "device_model": dev.device_model,
+        }
+        for dev in state.online_devices()
+        if dev.device_id and dev.device_id not in _assigned_uuids
+    ]
+    device_pool_html = _render_device_pool_body(
+        assignments=device_pool_assignments,
+        observed_unassigned=device_pool_observed,
+    )
     return _render_dashboard_html(
         css=_CSS,
         nav_html=nav_html,
@@ -102,6 +131,7 @@ def render_events_index_html(
         tuning_html=tuning_html,
         strike_zone_html=strike_zone_html,
         intrinsics_html=intrinsics_html,
+        device_pool_html=device_pool_html,
         events_html=events_html,
         scene_div=scene_div,
         scene_runtime_html=scene_runtime_fragment,
