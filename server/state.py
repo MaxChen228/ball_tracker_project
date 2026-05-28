@@ -53,6 +53,7 @@ from state_calibration import (
     DeviceIntrinsicsStore,
 )
 from state_devices import DeviceRegistry
+from state_device_assignments import DeviceAssignmentStore
 from state_events import build_events
 from state_processing import SessionProcessingState
 from state_sync import (
@@ -295,6 +296,17 @@ class State:
         self._device_intrinsics = DeviceIntrinsicsStore(
             self._device_intrinsics_dir,
             atomic_write=self._atomic_write,
+        )
+        # Persistent device_uuid → camera_id assignments. Multi-camera rig
+        # support (Phase 0 of N-camera plan): operator assigns cam_ids via
+        # dashboard, server survives restart. In PR1 the store is populated
+        # via /devices/assign REST but is NOT yet enforced at WS handshake
+        # — PR2 wires that. Single JSON for the whole map (small, dashboard
+        # reads the full list on every poll).
+        self._device_assignments = DeviceAssignmentStore(
+            data_dir / "device_assignments.json",
+            atomic_write=self._atomic_write,
+            time_fn=time_fn,
         )
         # Preset library is disk-backed (`data/presets/<name>.json`).
         # Seed built-in tennis / blue_ball files if missing — must run
@@ -868,6 +880,49 @@ class State:
             if dev is None or dev.device_id is None:
                 return None
             return self._device_intrinsics.get(dev.device_id)
+
+    # ------------------------------------------------------------------
+    # Device assignments (Phase 0 — multi-camera rig support)
+    # ------------------------------------------------------------------
+    # Authoritative `device_uuid → camera_id` map persisted under
+    # `data/device_assignments.json`. Dashboard pool panel reads via
+    # `device_assignments()`; assign/unassign go through the methods
+    # below so the state lock serialises mutations against the read
+    # path (state.online_devices, etc. already hold the same lock).
+
+    def device_assignments(self) -> list:
+        with self._lock:
+            return self._device_assignments.snapshot()
+
+    def assign_device(
+        self,
+        *,
+        device_uuid: str,
+        camera_id: str,
+        device_model: str | None = None,
+    ):
+        with self._lock:
+            return self._device_assignments.assign(
+                device_uuid=device_uuid,
+                camera_id=camera_id,
+                device_model=device_model,
+            )
+
+    def unassign_device_by_camera(self, camera_id: str) -> bool:
+        with self._lock:
+            return self._device_assignments.unassign_by_camera(camera_id)
+
+    def unassign_device_by_uuid(self, device_uuid: str) -> bool:
+        with self._lock:
+            return self._device_assignments.unassign_by_device(device_uuid)
+
+    def assignment_for_camera(self, camera_id: str):
+        with self._lock:
+            return self._device_assignments.get_by_camera(camera_id)
+
+    def assignment_for_device(self, device_uuid: str):
+        with self._lock:
+            return self._device_assignments.get_by_device(device_uuid)
 
     def ingest_live_frame(
         self,

@@ -176,6 +176,7 @@ from routes import pitch as _pitch_routes
 from routes import calibration as _calibration_routes
 from routes import calibration_intrinsics as _calibration_intrinsics_routes
 from routes import device_ws as _device_ws_routes
+from routes import devices as _devices_routes
 from routes import presets as _presets_routes
 from routes import algorithms as _algorithms_routes
 from routes import sim_events as _sim_events_routes
@@ -189,6 +190,7 @@ app.include_router(_pitch_routes.router)
 app.include_router(_calibration_routes.router)
 app.include_router(_calibration_intrinsics_routes.router)
 app.include_router(_device_ws_routes.router)
+app.include_router(_devices_routes.router)
 app.include_router(_presets_routes.router)
 app.include_router(_algorithms_routes.router)
 app.include_router(_sim_events_routes.router)
