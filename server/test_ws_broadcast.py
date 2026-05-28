@@ -14,6 +14,7 @@ from _test_helpers import (
     _make_scene,
     _project_pixels,
 )
+from conftest import preassign_and_open_ws
 
 
 def _post_calibration(client: TestClient, camera_id: str, K: np.ndarray, H: np.ndarray):
@@ -78,7 +79,7 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
     monkeypatch.setattr(main, "sse_hub", _CaptureHub())
     monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
 
-    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, preassign_and_open_ws(client, "B") as ws_b:
         assert ws_a.receive_json()["type"] == "settings"
         assert ws_b.receive_json()["type"] == "settings"
 
@@ -268,7 +269,7 @@ def test_live_websocket_single_camera_no_sync_anchor_drops_rays(monkeypatch):
     monkeypatch.setattr(main, "sse_hub", _CaptureHub())
     monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
 
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
         # Hello WITHOUT sync_anchor_timestamp_s — phone never synced.
         ws_a.send_json({"type": "hello", "cam": "A"})
@@ -310,7 +311,7 @@ def test_sync_trigger_broadcasts_websocket_command(monkeypatch):
 
     monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
 
-    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, preassign_and_open_ws(client, "B") as ws_b:
         assert ws_a.receive_json()["type"] == "settings"
         assert ws_b.receive_json()["type"] == "settings"
 
@@ -348,7 +349,7 @@ def test_calibration_post_broadcasts_websocket_update_to_siblings(monkeypatch):
 
     monkeypatch.setattr(main, "sse_hub", _CaptureHub())
 
-    with client.websocket_connect("/ws/device/A") as ws_a, client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, preassign_and_open_ws(client, "B") as ws_b:
         assert ws_a.receive_json()["type"] == "settings"
         assert ws_b.receive_json()["type"] == "settings"
 
@@ -404,7 +405,7 @@ def test_heartbeat_emits_device_heartbeat_sse(monkeypatch):
     monkeypatch.setattr(main, "sse_hub", _CaptureHub())
     monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
 
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
         ws_a.send_json({
             "type": "heartbeat",
@@ -460,7 +461,7 @@ def test_device_ws_normal_disconnect_emits_offline_broadcast(monkeypatch):
     monkeypatch.setattr(main.state, "mark_device_offline", _spy_mark_offline)
 
     client = TestClient(app)
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
         # Online event fires on connect.
         assert any(
@@ -527,10 +528,10 @@ def test_device_ws_reconnect_race_skips_offline_broadcast(monkeypatch):
     # `_sockets["A"]` with ws_b's socket — that's the reconnect race in
     # miniature. Close ws_a INSIDE the ws_b block so ws_a's finally
     # fires while ws_b still holds the slot.
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
         events_at_a_connect = len(events)
-        with client.websocket_connect("/ws/device/A") as ws_b:
+        with preassign_and_open_ws(client, "A") as ws_b:
             assert ws_b.receive_json()["type"] == "settings"
             # ws_b's connect broadcast online=True a second time —
             # confirm before we close ws_a.

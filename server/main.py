@@ -80,6 +80,7 @@ from preview import FRAME_MAX_AGE_S as _PREVIEW_FRAME_MAX_AGE_S  # noqa: F401
 from calibration_solver import PLATE_MARKER_WORLD
 from cleanup_old_sessions import cleanup_expired_sessions
 from sse import SSEHub, format_sse
+from state_pending_devices import PendingDeviceManager
 from ws import DeviceSocketManager
 
 # State, constants, and helper types now live in state.py.
@@ -230,6 +231,7 @@ async def _no_cache_html(request: Request, call_next):
         response.headers["Pragma"] = "no-cache"
     return response
 device_ws = DeviceSocketManager()
+pending_devices = PendingDeviceManager()
 sse_hub = SSEHub()
 
 

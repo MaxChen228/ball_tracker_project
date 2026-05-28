@@ -31,6 +31,7 @@ def test_pool_empty_when_no_devices(tmp_path, monkeypatch):
     body = r.json()
     assert body == {
         "assignments": [],
+        "pending": [],
         "observed_unassigned": [],
         "cam_id_in_use": [],
     }

@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 
 import main
 from main import app
+from conftest import preassign_and_open_ws
 
 
 # ---------------------------------------------------------------- #
@@ -135,7 +136,7 @@ def test_sse_heartbeat_time_synced_matches_status_when_id_mismatches(fresh_state
     cam at the same instant, regardless of expected_id state."""
     hub = fresh_state
     client = TestClient(app)
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         _drain_initial_settings(ws_a)
         # Cam reports an old id, but server expects a different one
         # (e.g. operator just fired Quick chirp for a fresh attempt).
@@ -159,7 +160,7 @@ def test_sse_heartbeat_time_synced_matches_status_when_id_matches(fresh_state):
     expected id, both /status and SSE must agree on True."""
     hub = fresh_state
     client = TestClient(app)
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         _drain_initial_settings(ws_a)
         main.state.sync.set_expected_sync_id(["A"], "sy_match")
         _hello(ws_a, "A", sync_id="sy_match", anchor=10.0)
@@ -179,7 +180,7 @@ def test_sse_heartbeat_time_synced_matches_status_when_no_expected_set(fresh_sta
     id+anchor pair. Both sources must say True."""
     hub = fresh_state
     client = TestClient(app)
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         _drain_initial_settings(ws_a)
         _hello(ws_a, "A", sync_id="sy_anything", anchor=5.0)
         _heartbeat(ws_a, "A", sync_id="sy_anything", anchor=5.0)
@@ -221,8 +222,8 @@ def test_quick_chirp_dispatch_clears_anchors_and_blocks_arm_until_both_resync(fr
     client = TestClient(app)
     _calibrate_both(client)
 
-    with client.websocket_connect("/ws/device/A") as ws_a, \
-         client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, \
+         preassign_and_open_ws(client, "B") as ws_b:
         _drain_initial_settings(ws_a)
         _drain_initial_settings(ws_b)
         # Both cams report the same prior anchor so initial readiness
@@ -291,8 +292,8 @@ def test_quick_chirp_pre_fix_regression_simulation(fresh_state):
     client = TestClient(app)
     _calibrate_both(client)
 
-    with client.websocket_connect("/ws/device/A") as ws_a, \
-         client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, \
+         preassign_and_open_ws(client, "B") as ws_b:
         _drain_initial_settings(ws_a)
         _drain_initial_settings(ws_b)
         _hello(ws_a, "A", sync_id=None, anchor=None)
@@ -334,8 +335,8 @@ def test_quick_chirp_during_armed_session_is_a_no_op(fresh_state):
     client = TestClient(app)
     _calibrate_both(client)
 
-    with client.websocket_connect("/ws/device/A") as ws_a, \
-         client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, \
+         preassign_and_open_ws(client, "B") as ws_b:
         _drain_initial_settings(ws_a)
         _drain_initial_settings(ws_b)
         _hello(ws_a, "A", sync_id="sy_same", anchor=10.0)
@@ -370,8 +371,8 @@ def test_offline_cam_re_sync_then_pair_check_catches_drift(fresh_state):
     _calibrate_both(client)
 
     # Round 1 — both online, both lock to the same id.
-    with client.websocket_connect("/ws/device/A") as ws_a, \
-         client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, \
+         preassign_and_open_ws(client, "B") as ws_b:
         _drain_initial_settings(ws_a)
         _drain_initial_settings(ws_b)
         _hello(ws_a, "A", sync_id=None, anchor=None)
@@ -392,7 +393,7 @@ def test_offline_cam_re_sync_then_pair_check_catches_drift(fresh_state):
     main.state._device_registry.mark_offline("A")
 
     # Round 2 — only B online, operator re-triggers, B locks new id.
-    with client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "B") as ws_b:
         _drain_initial_settings(ws_b)
         _heartbeat(ws_b, "B", sync_id=id_first, anchor=200.0)
         client.post("/sync/trigger", json={"camera_ids": ["B"]})
@@ -403,8 +404,8 @@ def test_offline_cam_re_sync_then_pair_check_catches_drift(fresh_state):
 
     # Round 3 — A reconnects with its stale id_first, B still on
     # id_second. expected[A] is whatever round 1 left (id_first).
-    with client.websocket_connect("/ws/device/A") as ws_a, \
-         client.websocket_connect("/ws/device/B") as ws_b:
+    with preassign_and_open_ws(client, "A") as ws_a, \
+         preassign_and_open_ws(client, "B") as ws_b:
         _drain_initial_settings(ws_a)
         _drain_initial_settings(ws_b)
         _hello(ws_a, "A", sync_id=id_first, anchor=100.0)

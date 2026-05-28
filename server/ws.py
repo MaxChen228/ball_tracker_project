@@ -31,6 +31,18 @@ class DeviceSocketManager:
 
     async def connect(self, camera_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
+        self.bind(camera_id, websocket)
+
+    def bind(self, camera_id: str, websocket: WebSocket) -> None:
+        """Register an already-accepted WebSocket under camera_id.
+
+        Used by the device-uuid handshake (PR3): the WS is accepted at
+        the top of the handler so it can send `cam_id_pending` /
+        `cam_id_assigned` before the cam_id binding is known. Once the
+        assignment resolves, the handler calls `bind()` directly rather
+        than going through `connect()` which would attempt a second
+        accept().
+        """
         now = time.time()
         with self._lock:
             self._sockets[camera_id] = websocket
@@ -51,6 +63,13 @@ class DeviceSocketManager:
             self._last_seen_at[camera_id] = now
             if sent_ts is not None:
                 self._last_latency_ms[camera_id] = max(0.0, (now - sent_ts) * 1000.0)
+
+    def snapshot_socket(self, camera_id: str) -> WebSocket | None:
+        """Return the raw WebSocket bound to `camera_id`, if any. Used by
+        the device-uuid reassign flow to close a stale binding so iOS
+        reconnects through the handshake."""
+        with self._lock:
+            return self._sockets.get(camera_id)
 
     def snapshot(self) -> dict[str, DeviceSocketSnapshot]:
         with self._lock:

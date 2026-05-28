@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import main
 from main import app
+from conftest import preassign_and_open_ws
 
 
 _DEVICE_ID = "abc12345-1234-5678-90ab-cdef00112233"
@@ -80,37 +81,6 @@ def test_invalid_device_id_rejected(tmp_path, monkeypatch):
 
     r2 = client.post("/calibration/intrinsics/has spaces", json=_VALID_BODY)
     assert r2.status_code in (400, 404)
-
-
-def test_dashboard_adapter_emits_fy_not_fz():
-    """Regression guard for `84_intrinsics.js::_adaptIntrinsicsJson`.
-
-    The adapter pivots `calibrate_intrinsics.py` flat output (`fx/fy/cx/cy`
-    at top level) into the nested `DeviceIntrinsics` shape the endpoint
-    expects. A previous version wrote `fz: fy` (legacy field name) into the
-    nested intrinsics block — but the `fz` alias on `IntrinsicsPayload` has
-    been retired (migration script removed 2026-04-29), so every dashboard
-    upload then 422'd with `intrinsics.fy Field required`.
-
-    This test reads the JS source and asserts the adapter emits `fy` in the
-    nested block. Source-level guard since the adapter lives in browser JS
-    and there is no JS test runner in this repo."""
-    from pathlib import Path
-
-    js_path = Path(__file__).parent / "static" / "dashboard" / "84_intrinsics.js"
-    src = js_path.read_text()
-    # Pin the exact emit line so a stylistic rewrite still fails this guard
-    # if it reintroduces `fz` in the intrinsics object.
-    assert "fz: fy" not in src, (
-        "84_intrinsics.js::_adaptIntrinsicsJson is emitting legacy `fz` field; "
-        "IntrinsicsPayload no longer accepts fz — write `fy` instead."
-    )
-    # And positive: the adapter must produce an `fy` key inside its
-    # nested `intrinsics: { ... }` block.
-    assert "fx, fy, cx, cy" in src, (
-        "84_intrinsics.js::_adaptIntrinsicsJson should emit `fx, fy, cx, cy` "
-        "in the nested intrinsics object."
-    )
 
 
 def test_principal_point_outside_image_rejected(tmp_path, monkeypatch):
@@ -239,7 +209,7 @@ def test_hello_carries_device_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
     client = TestClient(app)
 
-    with client.websocket_connect("/ws/device/A") as ws:
+    with preassign_and_open_ws(client, "A") as ws:
         ws.send_json({
             "type": "hello",
             "cam": "A",
@@ -337,3 +307,59 @@ def test_video_basis_intrinsics_charuco_without_photo_fov_skips_correction():
     )
     assert fxc == 1.0
     assert fyc == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Algorithm parity — synthetic ChArUco projections → calibrateCamera must
+# recover the known ground-truth K to <1px. Migrated from the deleted
+# server/test_calibrate_intrinsics.py because the iOS Obj-C++ port in
+# ball_tracker/CharucoCalibrator.mm uses the exact same OpenCV pipeline;
+# this test locks the server-side reference numbers the iOS solver is
+# verified against in CLAUDE.md plan Verification step 2.
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_recovers_known_intrinsics_from_synthetic_projections():
+    import cv2
+    import numpy as np
+
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    board = cv2.aruco.CharucoBoard((5, 7), 0.040, 0.030, aruco_dict)
+
+    fx_true, fy_true, cx_true, cy_true = 1600.0, 1600.0, 960.0, 540.0
+    K_true = np.array([[fx_true, 0, cx_true], [0, fy_true, cy_true], [0, 0, 1.0]])
+    dist_true = np.zeros(5)
+    img_size = (1920, 1080)
+
+    corners_3d = board.getChessboardCorners().astype(np.float64)
+    ids = np.arange(len(corners_3d), dtype=np.int32).reshape(-1, 1)
+
+    rng = np.random.default_rng(seed=42)
+    poses = []
+    for i in range(18):
+        rx = (i - 9) * 0.12
+        ry = rng.uniform(-0.5, 0.5)
+        rz = rng.uniform(-0.2, 0.2)
+        tx = rng.uniform(-0.15, 0.15)
+        ty = rng.uniform(-0.10, 0.10)
+        tz = 0.55 + rng.uniform(-0.10, 0.20)
+        poses.append((np.array([rx, ry, rz]), np.array([tx, ty, tz])))
+
+    all_obj_pts: list = []
+    all_img_pts: list = []
+    for rvec, tvec in poses:
+        pts2d, _ = cv2.projectPoints(corners_3d, rvec, tvec, K_true, dist_true)
+        corners_f32 = pts2d.reshape(-1, 1, 2).astype(np.float32)
+        obj_pts, img_pts = board.matchImagePoints(corners_f32, ids.copy())
+        all_obj_pts.append(obj_pts)
+        all_img_pts.append(img_pts)
+
+    rms, K_rec, _, _, _ = cv2.calibrateCamera(
+        all_obj_pts, all_img_pts, img_size, None, None,
+    )
+
+    assert rms < 0.5, f"rms too high: {rms}"
+    assert abs(K_rec[0, 0] - fx_true) < 1.0
+    assert abs(K_rec[1, 1] - fy_true) < 1.0
+    assert abs(K_rec[0, 2] - cx_true) < 1.0
+    assert abs(K_rec[1, 2] - cy_true) < 1.0

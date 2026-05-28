@@ -22,6 +22,7 @@ from main import app
 import routes.device_ws as device_ws_module
 
 from _test_helpers import _make_scene, _project_pixels
+from conftest import preassign_and_open_ws
 
 
 def _post_calibration(client: TestClient, camera_id: str, K: np.ndarray, H: np.ndarray):
@@ -67,7 +68,7 @@ def test_rays_event_is_single_broadcast_per_frame_with_array(monkeypatch):
     # Reset module-level throttle state so this test sees a fresh emit.
     device_ws_module._last_frame_count_emit_ts.clear()
 
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
         ws_a.send_json({
             "type": "hello", "cam": "A",
@@ -130,7 +131,7 @@ def test_frame_count_emit_is_throttled_to_1hz(monkeypatch):
     monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
     device_ws_module._last_frame_count_emit_ts.clear()
 
-    with client.websocket_connect("/ws/device/A") as ws_a:
+    with preassign_and_open_ws(client, "A") as ws_a:
         assert ws_a.receive_json()["type"] == "settings"
         ws_a.send_json({
             "type": "hello", "cam": "A",

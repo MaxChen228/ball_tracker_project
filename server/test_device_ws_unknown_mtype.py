@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+from conftest import preassign_and_open_ws
 from main import app
 
 
@@ -21,8 +22,8 @@ def test_unknown_mtype_closes_ws(monkeypatch):
     """Sending a `type` the server doesn't recognise must raise inside
     `ws_device`, which the Starlette WS wrapper translates into a server-
     side close. From the client's POV the WS terminates abnormally (the
-    `with client.websocket_connect(...)` context exits via WebSocketDisconnect
-    rather than a clean orderly close).
+    `with ...` context exits via WebSocketDisconnect rather than a clean
+    orderly close).
     """
     client = TestClient(app)
 
@@ -35,10 +36,9 @@ def test_unknown_mtype_closes_ws(monkeypatch):
                 yield ""
 
     monkeypatch.setattr(main, "sse_hub", _NoopHub())
-    monkeypatch.setattr(main, "device_ws", main.DeviceSocketManager())
 
     with pytest.raises(Exception):  # WebSocketDisconnect or transport close
-        with client.websocket_connect("/ws/device/A") as ws_a:
+        with preassign_and_open_ws(client, "A") as ws_a:
             assert ws_a.receive_json()["type"] == "settings"
             # `frame_v999` is not a known mtype — handler must raise so
             # the WS closes instead of silently dropping the payload.

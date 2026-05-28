@@ -1,22 +1,52 @@
 """Per-device WebSocket endpoint.
 
-The phone connects to `/ws/device/{camera_id}` for the lifetime of its
-session: heartbeat liveness upstream, server settings + arm/disarm /
-sync_run signals downstream, and live detection frames inbound. Lifted
-out of `main.py` so the dispatch loop and the per-message handlers have
-their own home.
+The phone connects to `/ws/device/{device_uuid}` (Phase 0 PR3 — used to
+be `/ws/device/{camera_id}`). The handshake resolves device_uuid →
+camera_id via the persistent assignment store:
+
+  - already assigned  → server sends `cam_id_assigned`, normal flow
+                         starts immediately
+  - not yet assigned  → server sends `cam_id_pending`, holds the socket
+                         in `PendingDeviceManager`, and awaits the
+                         dashboard's `/devices/assign` POST. Once that
+                         fires the awaiting handler sends
+                         `cam_id_assigned` and proceeds.
+
+Post-handshake the loop is unchanged: heartbeat liveness upstream,
+server settings + arm/disarm / sync_run signals downstream, live
+detection frames inbound.
 """
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 import session_results
 from schemas import DetectionPath, FramePayload
 
 router = APIRouter()
+logger = logging.getLogger("ball_tracker")
+
+# identifierForVendor is UUID-format (36 chars with dashes); iOS occasionally
+# emits an `unknown-<...>` fallback when the vendor id is temporarily nil
+# (Background app refresh edge case), so allow 64 chars + the dash/alnum/
+# underscore character class.
+_DEVICE_UUID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+def _validate_device_uuid_or_close(device_uuid: str, websocket: WebSocket) -> bool:
+    """Return True iff the URL path device_uuid passes the format gate.
+
+    Called before `websocket.accept()` would commit us to the
+    connection — a bad device_uuid means the phone is misconfigured or
+    a hostile client is probing; close with 1008 (policy violation)
+    rather than letting it occupy the pending pool.
+    """
+    return bool(_DEVICE_UUID_RE.match(device_uuid))
 
 # Throttle `frame_count` SSE emits to ~1 Hz per (sid, cam). At 240 fps × 2
 # cams the raw rate is ~480 events/sec which floods the dashboard event
@@ -53,11 +83,12 @@ def _forget_frame_count_emits(session_id: str, camera_id: str) -> None:
     _last_frame_count_emit_ts.pop((session_id, camera_id), None)
 
 
-@router.websocket("/ws/device/{camera_id}")
-async def ws_device(camera_id: str, websocket: WebSocket) -> None:
+@router.websocket("/ws/device/{device_uuid}")
+async def ws_device(device_uuid: str, websocket: WebSocket) -> None:
     from main import (
         state,
         device_ws,
+        pending_devices,
         sse_hub,
         _arm_message_for,
         _gated_time_synced,
@@ -65,10 +96,100 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
         _parse_device_identity,
         _settings_message_for,
     )
-    from routes.camera import _validate_camera_id_or_422
 
-    _validate_camera_id_or_422(camera_id)
-    await device_ws.connect(camera_id, websocket)
+    # Format gate — reject hostile / misconfigured device_uuid before
+    # accept(). A bad uuid would otherwise pollute the pending pool.
+    if not _validate_device_uuid_or_close(device_uuid, websocket):
+        await websocket.close(code=1008)
+        return
+
+    # accept() commits us. From here every exit path must close cleanly.
+    await websocket.accept()
+
+    # Handshake: resolve device_uuid → camera_id, sending either
+    # `cam_id_assigned` (fast path) or `cam_id_pending` + await
+    # (slow path).
+    #
+    # RACE-FREE: assignment lookup + pending registration MUST happen
+    # without any `await` between them. Otherwise the assign endpoint
+    # can fire in the gap and notify_assigned will find no entry to
+    # wake. See state_pending_devices.py module docstring.
+    assignment = state.assignment_for_device(device_uuid)
+    if assignment is None:
+        # Slow path. Register BEFORE first await so a concurrent assign
+        # endpoint always finds the entry.
+        pending_entry = pending_devices.register(
+            device_uuid=device_uuid,
+            websocket=websocket,
+        )
+        try:
+            await websocket.send_json({
+                "type": "cam_id_pending",
+                "device_uuid": device_uuid,
+            })
+        except Exception:
+            pending_devices.unregister(device_uuid)
+            return
+        # Wait concurrently for either (a) assignment event fires, or
+        # (b) iOS disconnects / sends a stray message (protocol error
+        # during pending — close hard).
+        receive_task = asyncio.create_task(websocket.receive_json())
+        event_task = asyncio.create_task(pending_entry.event.wait())
+        done, still_pending = await asyncio.wait(
+            [receive_task, event_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in still_pending:
+            t.cancel()
+        # Drain the cancelled task's exception so asyncio doesn't warn.
+        for t in still_pending:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        pending_devices.unregister(device_uuid)
+        if receive_task in done:
+            # iOS either disconnected or sent something during pending
+            # mode. Either way, abort — we won't process messages until
+            # cam_id is bound, and a stray message is a protocol bug.
+            exc = receive_task.exception()
+            if isinstance(exc, WebSocketDisconnect):
+                return
+            logger.warning(
+                "device_uuid=%s sent message during pending mode "
+                "or disconnected — closing", device_uuid,
+            )
+            try:
+                await websocket.close(code=1002)  # protocol error
+            except Exception:
+                pass
+            return
+        # event_task done → check if assignment landed (notify_assigned)
+        # or if the entry was woken by unassign / supersession with no
+        # cam_id (assigned_cam_id stays None in those cases).
+        if pending_entry.assigned_cam_id is None:
+            try:
+                await websocket.close(code=1000)
+            except Exception:
+                pass
+            return
+        camera_id = pending_entry.assigned_cam_id
+    else:
+        camera_id = assignment.camera_id
+
+    # cam_id resolved — tell iOS, then enter the normal flow.
+    try:
+        await websocket.send_json({
+            "type": "cam_id_assigned",
+            "camera_id": camera_id,
+            "device_uuid": device_uuid,
+        })
+    except Exception:
+        return
+
+    # Promote into the active socket registry under the resolved cam_id.
+    # `bind()` skips `accept()` (we already accepted at handshake top).
+    device_ws.bind(camera_id, websocket)
     # Freshen `Device.last_seen_at` immediately on connect so `/status`
     # sees the cam as online without waiting for the first `hello` to
     # arrive. Otherwise we age out on disconnect, broadcast
@@ -77,12 +198,9 @@ async def ws_device(camera_id: str, websocket: WebSocket) -> None:
     # because its last_seen_at is old, so the panel races back to
     # offline for up to one hello cadence.
     #
-    # IMPORTANT: use `touch_device_last_seen` (not `heartbeat`) on
-    # reconnect. `heartbeat(camera_id)` with no kwargs would rebuild
-    # the Device record with `time_synced=False` / `time_sync_id=None`,
-    # wiping a prior session's chirp anchor on every reconnect blip
-    # until the next `hello` arrived. The touch helper updates only
-    # `last_seen_at` so time-sync state survives the reconnect.
+    # IMPORTANT: use `touch_device_last_seen` (not `heartbeat`). The
+    # touch helper updates only `last_seen_at` so time-sync state
+    # survives the handshake without being wiped.
     state.touch_device_last_seen(camera_id)
 
     def _record_liveness(msg: dict) -> None:

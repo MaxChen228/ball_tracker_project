@@ -8,10 +8,11 @@ from fastapi.testclient import TestClient
 
 import main
 from main import app
+from conftest import preassign_and_open_ws
 
 
 def _fetch_ws_settings(test_client, camera_id: str):
-    with test_client.websocket_connect(f"/ws/device/{camera_id}") as ws:
+    with preassign_and_open_ws(test_client, camera_id) as ws:
         ws.send_json({"type": "hello"})
         for _ in range(5):
             msg = ws.receive_json()
@@ -485,7 +486,7 @@ def test_ws_connected_device_visible_within_stale_window_then_drops(tmp_path, mo
         return clock[0]
     monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path, time_fn=fake_time))
     client = TestClient(app)
-    with client.websocket_connect("/ws/device/A") as ws:
+    with preassign_and_open_ws(client, "A") as ws:
         # Within stale window — device should appear
         clock[0] += 1.0
         got = client.get("/status").json()["devices"]
