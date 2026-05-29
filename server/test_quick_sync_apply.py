@@ -17,6 +17,17 @@ from main import app
 from schemas import QuickSyncReport
 
 
+class _CaptureDeviceWS:
+    """Stand-in for the live DeviceSocketManager so a TestClient call can
+    assert what apply WS-pushed without a real socket."""
+
+    def __init__(self) -> None:
+        self.broadcasts: list[dict[str, dict[str, object]]] = []
+
+    async def broadcast(self, message_by_camera: dict[str, dict[str, object]]) -> None:
+        self.broadcasts.append(message_by_camera)
+
+
 def _solve_quick_sync(emitter: str, anchors: dict[str, float]):
     """Drive the state machine to a solved QuickSyncResult. Heartbeats
     every cam online, starts a run, feeds one report per listener.
@@ -49,6 +60,55 @@ def test_apply_stamps_all_cam_anchors():
         assert dev.sync_anchor_timestamp_s == result.anchors_pts_s[cam]
         assert dev.time_synced is True
         assert dev.time_sync_id == result.id
+
+
+def test_apply_pushes_anchor_to_each_stamped_cam(monkeypatch):
+    """BLOCK#1 fix: apply must WS-push each stamped cam its own anchor so
+    iOS adopts it as lastSyncAnchor — otherwise the next heartbeat (nil or
+    stale local anchor) wipes the registry value apply just wrote."""
+    result = _solve_quick_sync("A", {"A": 100.0, "B": 100.0123, "C": 99.997})
+    cap = _CaptureDeviceWS()
+    monkeypatch.setattr(main, "device_ws", cap)
+    client = TestClient(app)
+    r = client.post(f"/sync/quick_apply/{result.id}")
+    assert r.status_code == 200, r.text
+    assert len(cap.broadcasts) == 1
+    pushed = cap.broadcasts[0]
+    assert set(pushed.keys()) == {"A", "B", "C"}
+    for cam in ("A", "B", "C"):
+        assert pushed[cam] == {
+            "type": "quick_sync_applied",
+            "sync_id": result.id,
+            "sync_anchor_timestamp_s": result.anchors_pts_s[cam],
+        }
+
+
+def test_apply_does_not_push_missing_cam(monkeypatch):
+    """A listener that missed the chirp is in missing_cam_ids — it gets no
+    push, so its device keeps reporting its own (nil) anchor and the
+    registry clears explicitly rather than retaining a stale value."""
+    for cam in ("A", "B", "C"):
+        main.state.heartbeat(cam)
+    run, reason = main.state.start_quick_sync("A")
+    assert reason is None and run is not None
+    result = None
+    # A (emitter) + B hear; C misses.
+    for cam, anchor in (("A", 10.0), ("B", 10.0005)):
+        _, result, _ = main.state.sync.record_quick_sync_report(
+            QuickSyncReport(camera_id=cam, sync_id=run.id, anchor_pts_s=anchor))
+    _, result, _ = main.state.sync.record_quick_sync_report(
+        QuickSyncReport(camera_id="C", sync_id=run.id, anchor_pts_s=None,
+                        aborted=True, abort_reason="no_self_hear"))
+    assert result is not None and result.aborted is False
+    assert "C" in result.missing_cam_ids
+    cap = _CaptureDeviceWS()
+    monkeypatch.setattr(main, "device_ws", cap)
+    client = TestClient(app)
+    r = client.post(f"/sync/quick_apply/{result.id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["missing"] == ["C"]
+    assert len(cap.broadcasts) == 1
+    assert set(cap.broadcasts[0].keys()) == {"A", "B"}
 
 
 def test_apply_with_no_result_404():

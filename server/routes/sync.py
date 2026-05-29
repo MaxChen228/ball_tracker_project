@@ -185,7 +185,7 @@ def sync_quick_state() -> dict[str, Any]:
 
 
 @router.post("/sync/quick_apply/{sync_id}")
-def sync_quick_apply(sync_id: str) -> dict[str, Any]:
+async def sync_quick_apply(sync_id: str) -> dict[str, Any]:
     """Apply the most-recent solved quick-sync's per-cam anchors to the
     device registry, so live pairing's anchor-relative window math picks
     them up. Without this step a quick sync solves and renders on the
@@ -194,8 +194,21 @@ def sync_quick_apply(sync_id: str) -> dict[str, Any]:
     Idempotent: re-applying the same sync_id re-stamps the identical
     anchors. Listeners that missed the chirp are in `missing_cam_ids`
     and are NOT stamped (no silent fallback — operator re-syncs or
-    proceeds without that cam)."""
-    from main import state
+    proceeds without that cam).
+
+    After stamping the registry, WS-push each stamped cam its own anchor
+    so iOS adopts it as `lastSyncAnchor`. This closes the heartbeat
+    overwrite hole: the device registry field is the same one iOS
+    heartbeats populate, and the next heartbeat after apply carries the
+    device's local anchor — which for a quick-only phone is otherwise nil
+    (it never locally detected the chirp; the server cross-correlated it)
+    or a stale mutual value, either of which would wipe / clobber the
+    anchor this route just wrote. Pushing it back makes the device the
+    consistent source of truth the heartbeat contract already assumes.
+    A cam in `missing_cam_ids` gets no push; its anchor stays whatever it
+    was and the device's own nil-anchor heartbeat will clear it (explicit
+    empty, not a stale-value fallback)."""
+    from main import device_ws, state
     result = state.sync.last_quick_sync_result()
     if result is None:
         raise HTTPException(status_code=404, detail="no_result")
@@ -206,12 +219,21 @@ def sync_quick_apply(sync_id: str) -> dict[str, Any]:
             status_code=409,
             detail={"reason": "stale_sync_id", "expected": result.id},
         )
-    for cam, anchor in sorted(result.anchors_pts_s.items()):
+    applied = sorted(result.anchors_pts_s.items())
+    for cam, anchor in applied:
         state.set_device_sync_anchor(cam, anchor, result.id)
+    await device_ws.broadcast({
+        cam: {
+            "type": "quick_sync_applied",
+            "sync_id": result.id,
+            "sync_anchor_timestamp_s": anchor,
+        }
+        for cam, anchor in applied
+    })
     return {
         "ok": True,
         "sync_id": sync_id,
-        "applied": sorted(result.anchors_pts_s.keys()),
+        "applied": [cam for cam, _ in applied],
         "missing": list(result.missing_cam_ids),
     }
 
