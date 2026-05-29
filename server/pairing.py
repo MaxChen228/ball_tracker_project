@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from itertools import combinations
 
 import numpy as np
 
@@ -249,7 +250,7 @@ def triangulate_live_pair(
     ceilings (`_EMIT_COST_CEILING` / `_EMIT_GAP_CEILING_M`), returns all
     survivors. Empty list when no candidates pair up (no ball detected,
     outside time window, all near-parallel, or all gap-rejected) — same
-    failure surface as `triangulate_cycle`.
+    failure surface as `triangulate_pair_rays`.
 
     Bypasses `triangulate_pair` / `scale_pitch_to_video_dims` because the
     live path's intrinsics are already the calibration snapshot itself
@@ -345,10 +346,10 @@ def _frame_items(p: PitchPayload, *, source: str = "server"):
     return out
 
 
-def triangulate_cycle(
+def triangulate_pair_rays(
     a: PitchPayload, b: PitchPayload, *, source: str = "server",
 ) -> list[TriangulatedPoint]:
-    """Pair A and B frames within an 8 ms window of anchor-relative time
+    """Pair two cameras' frames within an 8 ms window of anchor-relative time
     and run multi-candidate fan-out triangulation. Each matched frame
     pair iterates every (A.candidates × B.candidates) combination and
     emits every survivor whose selector cost and skew-line gap are under
@@ -440,3 +441,56 @@ def triangulate_cycle(
         _MAX_DT_S, _EMIT_COST_CEILING, _EMIT_GAP_CEILING_M,
     )
     return results
+
+
+def pair_key(cam_i: str, cam_j: str) -> tuple[str, str]:
+    """Canonical camera-pair key: the two cam_ids sorted lexically. A pair
+    is an unordered set of two cameras; sorting guarantees (A,B) and (B,A)
+    map to the same key regardless of ingest order. Serialise with
+    `pair_key_str` when a dict/JSON string key is needed."""
+    return tuple(sorted((cam_i, cam_j)))  # type: ignore[return-value]
+
+
+def pair_key_str(key: tuple[str, str]) -> str:
+    """`('A','B') → 'A|B'`. The `|` separator can't collide with a cam_id
+    (cam_ids match `^[A-Za-z0-9_-]{1,16}$`), so the string round-trips."""
+    return f"{key[0]}|{key[1]}"
+
+
+def triangulate_all_pairs(
+    pitches: dict[str, PitchPayload], *, source: str = "server",
+) -> dict[tuple[str, str], list[TriangulatedPoint]]:
+    """N-camera triangulation as C(N,2) independent stereo pairs — the
+    pair-as-atom design: any two cameras reconstruct a point, so N cameras
+    emit one trajectory per camera pair. A camera that's blind for part of
+    a pitch simply contributes no points to its pairs while the other pairs
+    keep reconstructing — the dead-angle rescue motivation for going
+    N-camera.
+
+    Returns `{(cam_i, cam_j): points}` for every pair whose BOTH cameras
+    carry calibration. A pair missing calibration on either side is SKIPPED
+    (logged), not silently zero-filled — the operator sees which pairs ran.
+    N=2 collapses to the single `{('A','B'): triangulate_pair_rays(A,B)}`
+    entry, behaviourally identical to the pre-N path."""
+    cam_ids = sorted(pitches.keys())
+    out: dict[tuple[str, str], list[TriangulatedPoint]] = {}
+    for ci, cj in combinations(cam_ids, 2):
+        a, b = pitches[ci], pitches[cj]
+        if a.intrinsics is None or a.homography is None:
+            logger.info(
+                "triangulate_all_pairs skip pair=%s|%s reason=cam_%s_uncalibrated",
+                ci, cj, ci,
+            )
+            continue
+        if b.intrinsics is None or b.homography is None:
+            logger.info(
+                "triangulate_all_pairs skip pair=%s|%s reason=cam_%s_uncalibrated",
+                ci, cj, cj,
+            )
+            continue
+        out[(ci, cj)] = triangulate_pair_rays(a, b, source=source)
+    logger.info(
+        "triangulate_all_pairs complete cams=%s pairs_emitted=%d",
+        cam_ids, len(out),
+    )
+    return out

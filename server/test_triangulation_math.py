@@ -103,7 +103,7 @@ def test_triangulate_perfect_rays_recovers_point():
     assert gap < 1e-6
 
 
-# --------------------------- triangulate_cycle unit (direct, no /pitch) ------
+# --------------------------- triangulate_pair_rays unit (direct, no /pitch) ------
 
 
 def test_triangulate_sweeps_ball_path():
@@ -122,7 +122,7 @@ def test_triangulate_sweeps_ball_path():
 
     payload_a = _direct_payload_with_frames("A", sid(1), path, ts, R_a, t_a, H_a, K)
     payload_b = _direct_payload_with_frames("B", sid(1), path, ts, R_b, t_b, H_b, K)
-    points = pairing.triangulate_cycle(payload_a, payload_b)
+    points = pairing.triangulate_pair_rays(payload_a, payload_b)
     assert len(points) == len(path)
     recovered = np.array([[p.x_m, p.y_m, p.z_m] for p in points])
     np.testing.assert_allclose(recovered, path, atol=1e-6)
@@ -277,7 +277,7 @@ def test_pairing_drop_diagnostics(caplog):
 
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="pairing"):
-        points = pairing.triangulate_cycle(payload_a, payload_b)
+        points = pairing.triangulate_pair_rays(payload_a, payload_b)
 
     assert len(points) == 1
 
@@ -302,11 +302,11 @@ def test_max_dt_env_override(monkeypatch):
     ts_b = [0.000, 0.120]
     payload_a, payload_b = _build_pairing_payloads(ts_a, ts_b, session_id)
 
-    points_default = pairing.triangulate_cycle(payload_a, payload_b)
+    points_default = pairing.triangulate_pair_rays(payload_a, payload_b)
     assert len(points_default) == 1
 
     monkeypatch.setattr(pairing, "_MAX_DT_S", 0.030)
-    points_wide = pairing.triangulate_cycle(payload_a, payload_b)
+    points_wide = pairing.triangulate_pair_rays(payload_a, payload_b)
     assert len(points_wide) == 2
 
 
@@ -401,9 +401,9 @@ def test_iter_frames_reconstructs_absolute_pts(tmp_path):
 
 # --- Live-path cache equivalence --------------------------------------------
 
-def test_triangulate_live_pair_matches_triangulate_cycle():
+def test_triangulate_live_pair_matches_triangulate_pair_rays():
     """`triangulate_live_pair` (cached-pose hot path for live) must produce
-    a point numerically identical to `triangulate_cycle`'s single-frame
+    a point numerically identical to `triangulate_pair_rays`'s single-frame
     result on the same geometry. Protects against the cache drifting
     away from the full pipeline."""
     from schemas import FramePayload, IntrinsicsPayload, PitchPayload
@@ -456,7 +456,7 @@ def test_triangulate_live_pair_matches_triangulate_cycle():
         image_width_px=1920, image_height_px=1080,
     )
 
-    ref = pairing.triangulate_cycle(pa, pb)
+    ref = pairing.triangulate_pair_rays(pa, pb)
     assert len(ref) == 1
     ref_pt = ref[0]
 

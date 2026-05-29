@@ -62,7 +62,7 @@ class IntrinsicsPayload(BaseModel):
 class BlobCandidate(BaseModel):
     """One CC-stat survivor passing the area+aspect+fill gates. Live
     path (iOS) ships every shape-gate-passing candidate per frame; the
-    server fans them all out through pairing.triangulate_cycle (every
+    server fans them all out through pairing.triangulate_pair_rays (every
     A-cand × B-cand combination per matched frame pair) and lets the
     skew-line residual gate + segmenter ballistic fit pick the real
     trajectory. There is no single "winner" per frame anymore — the

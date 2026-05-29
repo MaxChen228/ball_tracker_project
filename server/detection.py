@@ -3,7 +3,7 @@
 The iPhone uploads a raw H.264 MOV per cycle; this module runs an HSV
 threshold → connected-components → largest-blob pipeline on each decoded
 frame to recover `(px, py)` in image space. The result feeds `pipeline.py`
-which synthesises `FramePayload`s for the existing `triangulate_cycle` path.
+which synthesises `FramePayload`s for the existing `triangulate_pair_rays` path.
 
 HSV ranges are operator-controlled via the dashboard preset library —
 `data/presets/<name>.json` is the source of truth. `HSVRange.default()`

@@ -75,14 +75,20 @@ def ingest_live_frame(
                     state._detection_config
                 )
             )
-        # TODO(n-camera): generalize to iterate state.expected_camera_ids()
-        # once `triangulate_live` (below) accepts an N-pose dict. Today
-        # the hot path is pair-based (Phase 3 live_pairing peer-set
-        # change documented this contract).
-        cal_a = state._calibration_store.get("A")
-        cal_b = state._calibration_store.get("B")
-        dev_a = state._device_registry.get("A")
-        dev_b = state._device_registry.get("B")
+        # N-camera live pairing: build pose + anchor for every cam the rig
+        # knows about (heartbeated this run ∪ persisted calibration ∪ the
+        # rig baseline ∪ the incoming cam), not a literal A/B pair. Mirrors
+        # `State.expected_camera_ids` — replicated inline here because we
+        # already hold the non-reentrant `state._lock` and the public
+        # accessor would re-acquire it.
+        rig_cams = sorted(
+            set(state._device_registry.known_camera_ids())
+            | set(state._calibration_store.snapshot().keys())
+            | {"A", "B"}
+            | {camera_id}
+        )
+        cals = {cam: state._calibration_store.get(cam) for cam in rig_cams}
+        devs = {cam: state._device_registry.get(cam) for cam in rig_cams}
         session_obj = state._lookup_session_locked(session_id)
         # Snapshot runtime capture height under the same lock that
         # protects every other runtime-settings read in this class
@@ -91,14 +97,14 @@ def ingest_live_frame(
         live_h = state._runtime_settings.capture_height_px
 
     # Each iPhone's `frame.timestamp_s` is its own mach-absolute clock
-    # (seconds since device boot), so the two cameras' raw timestamps
-    # can be tens of thousands of seconds apart. Hand each device's
-    # anchor to `LivePairingSession.ingest` so its 8 ms cross-cam
-    # comparison happens on anchor-relative time, while persisted
-    # frames keep raw timestamps for downstream consumers.
+    # (seconds since device boot), so the cameras' raw timestamps can be
+    # tens of thousands of seconds apart. Hand each device's anchor to
+    # `LivePairingSession.ingest` so its 8 ms cross-cam comparison happens
+    # on anchor-relative time, while persisted frames keep raw timestamps
+    # for downstream consumers.
     anchors = {
-        "A": dev_a.sync_anchor_timestamp_s if dev_a is not None else None,
-        "B": dev_b.sync_anchor_timestamp_s if dev_b is not None else None,
+        cam: (dev.sync_anchor_timestamp_s if dev is not None else None)
+        for cam, dev in devs.items()
     }
 
     # Populate / refresh the per-cam cached pose on the live session
@@ -117,7 +123,8 @@ def ingest_live_frame(
     live_w = (live_h * 16) // 9
     live_dims = (live_w, live_h)
 
-    for cam, cal in (("A", cal_a), ("B", cal_b)):
+    for cam in rig_cams:
+        cal = cals[cam]
         if cal is None:
             live.update_camera_pose(cam, None)
             continue
@@ -140,24 +147,27 @@ def ingest_live_frame(
             image_wh=live_dims,
         ))
 
-    def triangulate_live(frame_a: FramePayload, frame_b: FramePayload) -> list[TriangulatedPoint]:
-        # frame_a / frame_b are pre-canonicalized A-first by ingest();
-        # the closure name + argument order is the contract. No
-        # cam-direction flipping needed here.
-        pose_a = live.camera_pose("A")
-        pose_b = live.camera_pose("B")
-        if pose_a is None or pose_b is None:
+    def triangulate_live(
+        cam_lo: str, cam_hi: str,
+        frame_lo: FramePayload, frame_hi: FramePayload,
+    ) -> list[TriangulatedPoint]:
+        # cams are pre-canonicalized lexically by ingest() (cam_lo < cam_hi)
+        # and frame_lo/frame_hi follow that order. Look up each cam's pose +
+        # anchor by id so any pair in an N-cam rig resolves correctly.
+        pose_lo = live.camera_pose(cam_lo)
+        pose_hi = live.camera_pose(cam_hi)
+        if pose_lo is None or pose_hi is None:
             return []
-        if dev_a is None or dev_b is None:
-            return []
-        if dev_a.sync_anchor_timestamp_s is None or dev_b.sync_anchor_timestamp_s is None:
+        anchor_lo = anchors.get(cam_lo)
+        anchor_hi = anchors.get(cam_hi)
+        if anchor_lo is None or anchor_hi is None:
             return []
         from pairing import triangulate_live_pair
         return triangulate_live_pair(
-            pose_a, pose_b,
-            frame_a, frame_b,
-            anchor_a=dev_a.sync_anchor_timestamp_s,
-            anchor_b=dev_b.sync_anchor_timestamp_s,
+            pose_lo, pose_hi,
+            frame_lo, frame_hi,
+            anchor_a=anchor_lo,
+            anchor_b=anchor_hi,
         )
 
     created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)

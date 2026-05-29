@@ -1,5 +1,5 @@
 """Tests for PairingTuning persistence + fan-out filter behaviour in
-`pairing.triangulate_cycle`."""
+`pairing.triangulate_pair_rays`."""
 from __future__ import annotations
 
 import json as _json
@@ -93,15 +93,15 @@ def test_rebuild_result_seeds_current_global_pairing_tuning(tmp_path, monkeypatc
     assert result.gap_threshold_m == pytest.approx(0.07)
 
 
-# ---------- triangulate_cycle fan-out: gap filter behaviour ----------
+# ---------- triangulate_pair_rays fan-out: gap filter behaviour ----------
 
 
-def test_triangulate_cycle_fan_out_emits_multi_points():
+def test_triangulate_pair_rays_fan_out_emits_multi_points():
     """Fan-out across 2 candidates per cam → up to 4 triangulated
     pairs, each tagged with source_a_cand_idx + source_b_cand_idx."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
-    from pairing import triangulate_cycle
+    from pairing import triangulate_pair_rays
 
     payload_a, payload_b = ttm._build_pairing_payloads(
         [0.0], [0.0], "s_fa00ff01",
@@ -131,7 +131,7 @@ def test_triangulate_cycle_fan_out_emits_multi_points():
         candidates=cands_b, ball_detected=True,
     ))
 
-    pts = triangulate_cycle(payload_a, payload_b)
+    pts = triangulate_pair_rays(payload_a, payload_b)
     # 2×2 fan-out: up to 4 points. Some may be near-parallel-rejected,
     # but the (cand0_a, cand0_b) pair should triangulate cleanly since
     # those are the original valid pixel pairs.
@@ -144,7 +144,7 @@ def test_triangulate_cycle_fan_out_emits_multi_points():
         assert 0 <= p.source_b_cand_idx < 2
 
 
-def test_triangulate_cycle_emit_carries_cost_for_downstream_filter():
+def test_triangulate_pair_rays_emit_carries_cost_for_downstream_filter():
     """Pairing emit is decoupled from any cost threshold (per-algorithm
     or otherwise). All candidate pairs under the absolute emit ceiling
     flow through; the emitted point's `cost_a` / `cost_b` carry the
@@ -153,7 +153,7 @@ def test_triangulate_cycle_emit_carries_cost_for_downstream_filter():
     using the algorithm's own threshold."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
-    from pairing import triangulate_cycle
+    from pairing import triangulate_pair_rays
 
     payload_a, payload_b = ttm._build_pairing_payloads(
         [0.0], [0.0], "s_c001ff02",
@@ -180,7 +180,7 @@ def test_triangulate_cycle_emit_carries_cost_for_downstream_filter():
         frame_index=0, timestamp_s=fb.timestamp_s,
         candidates=cands_b, ball_detected=True,
     ))
-    pts = triangulate_cycle(payload_a, payload_b)
+    pts = triangulate_pair_rays(payload_a, payload_b)
     # All four (cand_a × cand_b) pairs are well under the emit cost
     # ceiling (5.0).
     seen_pairs = {(p.source_a_cand_idx, p.source_b_cand_idx) for p in pts}
@@ -193,14 +193,14 @@ def test_triangulate_cycle_emit_carries_cost_for_downstream_filter():
             assert p.cost_a == 0.30
 
 
-def test_triangulate_cycle_emit_invariant_to_gap_threshold():
+def test_triangulate_pair_rays_emit_invariant_to_gap_threshold():
     """Pairing emit is decoupled from operator gap tuning. Loose vs
     tight runs produce identical emitted sets; only the absolute
     `_EMIT_GAP_CEILING_M` gates emit. The downstream filter at
     `_passes_stamped_filter` applies the per-session gap."""
     import test_triangulation_math as ttm
     from schemas import BlobCandidate, FramePayload
-    from pairing import triangulate_cycle
+    from pairing import triangulate_pair_rays
 
     payload_a, payload_b = ttm._build_pairing_payloads(
         [0.0], [0.0], "s_9af00f03",
@@ -225,8 +225,8 @@ def test_triangulate_cycle_emit_invariant_to_gap_threshold():
         )], ball_detected=True,
     ))
 
-    pts1 = triangulate_cycle(payload_a, payload_b)
-    pts2 = triangulate_cycle(payload_a, payload_b)
+    pts1 = triangulate_pair_rays(payload_a, payload_b)
+    pts2 = triangulate_pair_rays(payload_a, payload_b)
     assert len(pts1) == len(pts2)
     # Each emitted point carries its true geometric residual; a downstream
     # gap filter at 0.01 m would drop the high-residual pair even though

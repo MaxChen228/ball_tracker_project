@@ -34,7 +34,7 @@ import algorithms
 import presets
 import session_results
 from detection_paths import DetectionPath, pitch_with_path_frames
-from pairing import scale_pitch_to_video_dims, triangulate_cycle
+from pairing import scale_pitch_to_video_dims, triangulate_pair_rays
 from pairing_tuning import PairingTuning
 from schemas import (
     CalibrationSnapshot,
@@ -302,7 +302,7 @@ def triangulate_session(
     # whenever an operator re-runs server_post).
     if a.frames_live and b.frames_live:
         try:
-            live_pts = triangulate_cycle(
+            live_pts = triangulate_pair_rays(
                 pitch_with_path_frames(scale(a), DetectionPath.live),
                 pitch_with_path_frames(scale(b), DetectionPath.live),
                 source="server",
@@ -329,7 +329,7 @@ def triangulate_session(
             )
         else:
             try:
-                pts = triangulate_cycle(
+                pts = triangulate_pair_rays(
                     scale(a), scale(b), source="server",
                 )
             except Exception as e:

@@ -3,7 +3,7 @@
 `detect_pitch` decodes the video, runs HSV ball detection per frame, and
 synthesises a list of `FramePayload`s on the iOS session clock. The
 payload's `sync_anchor_timestamp_s` then makes anchor-relative time
-well-defined for A/B pairing, so `pairing.triangulate_cycle` can consume
+well-defined for A/B pairing, so `pairing.triangulate_pair_rays` can consume
 the post-detection `PitchPayload` with no code changes.
 
 The detector here is identical to the iOS live path:

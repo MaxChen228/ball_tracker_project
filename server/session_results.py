@@ -27,7 +27,7 @@ from detection_paths import (
     pitch_with_algorithm_frames,
     pitch_with_path_frames,
 )
-from pairing import scale_pitch_to_video_dims, triangulate_cycle
+from pairing import scale_pitch_to_video_dims, triangulate_pair_rays
 from schemas import (
     DetectionPath,
     FramePayload,
@@ -199,7 +199,7 @@ def triangulate_pair(
         b,
         (cal_b.image_width_px, cal_b.image_height_px) if cal_b else None,
     )
-    return triangulate_cycle(a_scaled, b_scaled, source=source)
+    return triangulate_pair_rays(a_scaled, b_scaled, source=source)
 
 
 def _triangulate_non_current_algorithms(
@@ -286,7 +286,7 @@ def _triangulate_non_current_algorithms(
                 f"{type(exc).__name__}: {exc}"
             )
             continue
-        # `triangulate_cycle` already emits t_rel-sorted (iterates
+        # `triangulate_pair_rays` already emits t_rel-sorted (iterates
         # `_frame_items` in t_rel order). Explicit sort here makes the
         # invariant visible so `set_active_server_post_algorithm`'s
         # fast path can safely re-stamp segments from cached buckets

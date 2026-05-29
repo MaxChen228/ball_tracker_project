@@ -68,12 +68,15 @@ class LivePairingSession:
     frame_counts: dict[str, int] = field(default_factory=dict)
     triangulated: list[TriangulatedPoint] = field(default_factory=list)
     # Dedupe key for already-triangulated candidate pairs, keyed by
-    # (a_frame_idx, b_frame_idx, ca_idx, cb_idx) — the candidate-index
-    # half is canonicalized so position [2] always references A's
-    # candidate index and [3] always references B's, regardless of which
-    # cam triggered the ingest call (mirrors the A-first canonicalization
-    # already applied to the frame-index half by the ingest loop).
-    paired_frame_ids: set[tuple[int, int, int, int]] = field(default_factory=set)
+    # (cam_lo, cam_hi, a_frame_idx, b_frame_idx, ca_idx, cb_idx) — the
+    # candidate-index half is canonicalized so position [4] always
+    # references the lexically-lower cam's candidate index and [5] the
+    # higher's, regardless of which cam triggered the ingest call (mirrors
+    # the lower-cam-first canonicalization the ingest loop applies to the
+    # frame-index half). The cam-pair prefix keys the dedup PER PAIR so
+    # that, with N≥3 cams, the same A-frame paired against B and against C
+    # produces two distinct entries instead of one masking the other.
+    paired_frame_ids: set[tuple[str, str, int, int, int, int]] = field(default_factory=set)
     completed_cameras: set[str] = field(default_factory=set)
     abort_reasons: dict[str, str] = field(default_factory=dict)
     # Per-cam cached geometry. Populated on first ingest per camera by
@@ -146,11 +149,16 @@ class LivePairingSession:
         self,
         cam: str,
         frame: FramePayload,
-        triangulate_pair: Callable[[FramePayload, FramePayload], list[TriangulatedPoint]],
+        triangulate_pair: Callable[[str, str, FramePayload, FramePayload], list[TriangulatedPoint]],
         anchors: dict[str, float | None] = NO_ANCHORS,
     ) -> list[TriangulatedPoint]:
         """Buffer one frame and pair it against the most recent peer-cam
-        frames within `window_s`.
+        frames within `window_s`, for EVERY peer cam independently (the
+        pair-as-atom live path: with N cams the incoming frame is matched
+        against each of the N−1 peers, each producing its own pair's
+        points). The callback receives `(cam_lo, cam_hi, frame_lo,
+        frame_hi)` with cams canonicalized lexically so it can look up the
+        right per-camera pose.
 
         `anchors` — `{cam_id: sync_anchor_timestamp_s_or_None}`. Defaults
         to module-level `NO_ANCHORS` (empty dict — `anchors.get(cam)`
@@ -180,77 +188,66 @@ class LivePairingSession:
             if not frame.ball_detected:
                 return []
 
-            # Peer cam = the single other cam_id whose buffer has any
-            # frames. Pair-based today: 0 peers (only this cam has ever
-            # streamed) → no pairs yet; exactly 1 peer → run the window
-            # match below. 2+ peers (future N-camera rig) currently NOT
-            # supported by this loop — raise loudly rather than silently
-            # picking the lexically-first peer.
+            # Peer cams = every other cam_id whose buffer has frames.
+            # 0 peers (only this cam has streamed) → no pairs yet. With
+            # N≥2 peers we run the window match against EACH peer — the
+            # pair-as-atom live path: the incoming frame contributes to
+            # every (cam, peer) pair independently.
             peer_cams = [c for c in self.buffers if c != cam and self.buffers[c]]
             if not peer_cams:
                 return []
-            if len(peer_cams) > 1:
-                raise NotImplementedError(
-                    f"live_pairing: {len(peer_cams)} peer cams "
-                    f"({peer_cams}) — N-view live pairing is a future "
-                    "phase; today only one peer is supported"
-                )
-            other = peer_cams[0]
             own_anchor = anchors.get(cam)
-            peer_anchor = anchors.get(other)
-            if (own_anchor is None) != (peer_anchor is None):
-                # Partial anchor (one cam synced, other not) — refusing to
-                # match on raw timestamps; the two devices' clocks sit
-                # ~10⁴ s apart so any pair would be garbage. Wait for the
-                # second chirp to land.
-                logger.info(
-                    "live_pairing: partial anchor session=%s cam=%s "
-                    "(own=%s peer=%s) — skipping window match",
-                    self.session_id, cam,
-                    own_anchor is not None, peer_anchor is not None,
-                )
-                return []
-            adjust = own_anchor is not None and peer_anchor is not None
-            own_t = frame.timestamp_s - own_anchor if adjust else frame.timestamp_s
-            candidates = self.buffers.setdefault(other, deque())
             created: list[TriangulatedPoint] = []
-            for peer in reversed(candidates):
-                peer_t = peer.timestamp_s - peer_anchor if adjust else peer.timestamp_s
-                dt = peer_t - own_t
-                if dt < -self.window_s:
-                    break
-                if abs(dt) > self.window_s or not peer.ball_detected:
-                    continue
-                # Canonicalize frame ordering by lexical cam_id so the
-                # callback always sees (lower_cam_frame, higher_cam_frame).
-                # Today this happens to be (A, B); a future rig with cam_ids
-                # like {"A","B","C"} keeps the contract stable. The
-                # callback (`triangulate_live`) reads pose_a / pose_b in
-                # this canonical order — caller still uses A/B-keyed pose
-                # lookup, so until that's generalized the rig must keep
-                # using "A" + "B" as its two cam_ids.
-                if cam < other:
-                    frame_a, frame_b = frame, peer
-                else:
-                    frame_a, frame_b = peer, frame
-                a_frame_idx, b_frame_idx = frame_a.frame_index, frame_b.frame_index
-                points = triangulate_pair(frame_a, frame_b)
-                if not points:
-                    continue
-                for pt in points:
-                    # Index pair is A-first / B-second by construction —
-                    # ca_idx stamped from `triangulate_live_pair`'s loop
-                    # over `frame_a.candidates`, which is A's frame above.
-                    pair_key = (
-                        a_frame_idx, b_frame_idx,
-                        pt.source_a_cand_idx if pt.source_a_cand_idx is not None else -1,
-                        pt.source_b_cand_idx if pt.source_b_cand_idx is not None else -1,
+            for other in peer_cams:
+                peer_anchor = anchors.get(other)
+                if (own_anchor is None) != (peer_anchor is None):
+                    # Partial anchor (this cam synced, peer not, or vice
+                    # versa) — refusing to match on raw timestamps; the two
+                    # devices' clocks sit ~10⁴ s apart so any pair would be
+                    # garbage. Skip THIS peer (others may be fully synced).
+                    logger.info(
+                        "live_pairing: partial anchor session=%s cam=%s peer=%s "
+                        "(own=%s peer=%s) — skipping this pair",
+                        self.session_id, cam, other,
+                        own_anchor is not None, peer_anchor is not None,
                     )
-                    if pair_key in self.paired_frame_ids:
+                    continue
+                adjust = own_anchor is not None and peer_anchor is not None
+                own_t = frame.timestamp_s - own_anchor if adjust else frame.timestamp_s
+                candidates = self.buffers.setdefault(other, deque())
+                # Canonicalize cam ordering lexically so the callback always
+                # sees (cam_lo, cam_hi, frame_lo, frame_hi) and can resolve
+                # the correct per-camera pose for either direction.
+                cam_lo, cam_hi = (cam, other) if cam < other else (other, cam)
+                for peer in reversed(candidates):
+                    peer_t = peer.timestamp_s - peer_anchor if adjust else peer.timestamp_s
+                    dt = peer_t - own_t
+                    if dt < -self.window_s:
+                        break
+                    if abs(dt) > self.window_s or not peer.ball_detected:
                         continue
-                    self.paired_frame_ids.add(pair_key)
-                    self.triangulated.append(pt)
-                    created.append(pt)
+                    if cam < other:
+                        frame_lo, frame_hi = frame, peer
+                    else:
+                        frame_lo, frame_hi = peer, frame
+                    lo_frame_idx, hi_frame_idx = frame_lo.frame_index, frame_hi.frame_index
+                    points = triangulate_pair(cam_lo, cam_hi, frame_lo, frame_hi)
+                    if not points:
+                        continue
+                    for pt in points:
+                        # Index pair is lo-first / hi-second by construction
+                        # — source_a_cand_idx stamped from the callback's
+                        # loop over frame_lo.candidates.
+                        dedup_key = (
+                            cam_lo, cam_hi, lo_frame_idx, hi_frame_idx,
+                            pt.source_a_cand_idx if pt.source_a_cand_idx is not None else -1,
+                            pt.source_b_cand_idx if pt.source_b_cand_idx is not None else -1,
+                        )
+                        if dedup_key in self.paired_frame_ids:
+                            continue
+                        self.paired_frame_ids.add(dedup_key)
+                        self.triangulated.append(pt)
+                        created.append(pt)
             return created
 
     def mark_completed(self, cam: str) -> None:
