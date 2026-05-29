@@ -288,6 +288,12 @@ final class CameraSyncCoordinator {
     }
 
     private func teardownQuickSync(status: String) {
+        // Cancel here too, not only at the call sites: the orphan path in
+        // handleQuickSyncRecording reaches teardown before its own cancel,
+        // and any future caller would otherwise leak the watchdog. Idempotent
+        // — safe to stack with the call-site cancels.
+        quickSyncWatchdog?.cancel()
+        quickSyncWatchdog = nil
         quickSyncAudio?.endSync()
         quickSyncAudio = nil
         pendingQuickSyncId = nil
@@ -485,6 +491,9 @@ final class CameraSyncCoordinator {
     }
 
     private func teardownMutualSync(status: String) {
+        // Same orphan-path / future-caller leak guard as teardownQuickSync.
+        syncWatchdog?.cancel()
+        syncWatchdog = nil
         syncAudio?.endSync()
         syncAudio = nil
         pendingSyncId = nil
