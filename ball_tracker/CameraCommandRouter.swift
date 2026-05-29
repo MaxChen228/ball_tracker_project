@@ -156,15 +156,34 @@ final class CameraCommandRouter {
         case "quick_sync_applied":
             // Server solved the quick sync and is pushing this cam its own
             // anchor (chirp-arrival PTS on this cam's clock) so iOS adopts
-            // it as lastSyncAnchor. No calIdle / state gate: it's a passive
-            // record-keeping update the device should accept regardless of
-            // state. Required fields fail loud, same atomic-drop pattern.
+            // it as lastSyncAnchor. Atomic-drop on missing required fields.
+            //
+            // Gate against calibration capture + audio-owning states:
+            // adopting an anchor here writes lastSyncAnchor + updateTimeSyncId
+            // which the next heartbeat reports. While `.mutualSyncing` /
+            // `.timeSyncWaiting` are in flight, those flows hold the
+            // invariant that heartbeats report nil until they resolve
+            // (startMutualSync L212 / beginTimeSync L141 clear anchor
+            // explicitly). Overwriting from a stray quick_sync_applied
+            // would silently break that invariant — the next heartbeat
+            // would advertise an anchor for a different sync_id than the
+            // active flow expects. Atomic-drop here; the operator can
+            // re-apply once standby/recording.
             guard let sid = message["sync_id"] as? String else {
                 commandLog.error("ws quick_sync_applied missing required field sync_id")
                 return
             }
             guard let anchorTs = message["sync_anchor_timestamp_s"] as? Double else {
                 commandLog.error("ws quick_sync_applied sid=\(sid, privacy: .public) missing required field sync_anchor_timestamp_s")
+                return
+            }
+            guard calIdle else {
+                commandLog.warning("ws quick_sync_applied dropped: calibration capture in flight (state=\(String(describing: self.deps.getCalCaptureState()), privacy: .public))")
+                return
+            }
+            let appState = deps.getState()
+            guard appState != .mutualSyncing && appState != .timeSyncWaiting else {
+                commandLog.warning("ws quick_sync_applied dropped: app state=\(String(describing: appState), privacy: .public) owns the anchor; would break the active flow's nil-heartbeat invariant")
                 return
             }
             DispatchQueue.main.async {

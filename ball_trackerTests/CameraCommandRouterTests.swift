@@ -546,6 +546,48 @@ final class CameraCommandRouterTests: XCTestCase {
         XCTAssertEqual(fixture.adoptQuickSyncAnchorCalls.first?.1, 123.456)
     }
 
+    func testQuickSyncAppliedDroppedDuringCalibrationCapture() {
+        let fixture = Fixture()
+        fixture.calCaptureState = .swappingTo
+        let (router, _, _) = makeRouter(fixture)
+        router.handle(message: [
+            "type": "quick_sync_applied",
+            "sync_id": "quick_cal",
+            "sync_anchor_timestamp_s": 1.234,
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.adoptQuickSyncAnchorCalls.isEmpty,
+                      "quick_sync_applied must drop while calibration capture is in flight")
+    }
+
+    func testQuickSyncAppliedDroppedDuringMutualSyncing() {
+        let fixture = Fixture()
+        fixture.state = .mutualSyncing
+        let (router, _, _) = makeRouter(fixture)
+        router.handle(message: [
+            "type": "quick_sync_applied",
+            "sync_id": "quick_during_mutual",
+            "sync_anchor_timestamp_s": 1.234,
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.adoptQuickSyncAnchorCalls.isEmpty,
+                      "quick_sync_applied must drop during .mutualSyncing — would break that flow's nil-heartbeat invariant")
+    }
+
+    func testQuickSyncAppliedDroppedDuringTimeSyncWaiting() {
+        let fixture = Fixture()
+        fixture.state = .timeSyncWaiting
+        let (router, _, _) = makeRouter(fixture)
+        router.handle(message: [
+            "type": "quick_sync_applied",
+            "sync_id": "quick_during_legacy",
+            "sync_anchor_timestamp_s": 1.234,
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.adoptQuickSyncAnchorCalls.isEmpty,
+                      "quick_sync_applied must drop during .timeSyncWaiting — that flow expects nil anchor until it resolves")
+    }
+
     func testQuickSyncAppliedDropsWhenAnchorMissing() {
         let (router, fixture, _) = makeRouter()
         router.handle(message: [
