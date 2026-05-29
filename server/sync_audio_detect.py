@@ -35,7 +35,7 @@ from chirp import (
     SYNC_CHIRP_DURATION_S,
     _hann_chirp,
 )
-from schemas import SyncReport, SyncTraceSample
+from schemas import SYNC_TRACE_THRESHOLD, SyncReport, SyncTraceSample
 
 
 # Cadence at which we emit trace samples to the /sync debug plot.
@@ -137,8 +137,12 @@ def detect_band(
     reference: np.ndarray,
     audio_start_pts_s: float,
 ) -> BandDetection:
-    """Global matched-filter search (single best peak). Used as fallback
-    when no expected emission times are available."""
+    """Global matched-filter search (single best peak).
+
+    TEST-ONLY: production always has `emit_at_s` (required upstream) so the
+    windowed path (`detect_band_windowed`) is always taken. Kept because
+    `test_sync_audio_detect.py` exercises the raw global-peak matched filter
+    directly. Do not call from production code."""
     result = _compute_norm_correlation(audio, reference)
     if result is None:
         return BandDetection(center_pts_s=audio_start_pts_s, peak_norm=0.0, psr=0.0, trace=[])
@@ -212,18 +216,34 @@ def detect_band_windowed(
     return out
 
 
-def _median_band_detection(detections: list[BandDetection]) -> BandDetection:
-    """Combine N per-burst detections → single BandDetection with median
-    center PTS and mean peak/PSR. Provides the trace from the last entry
-    (empty from windowed detection) for API compat."""
+def _median_band_detection(
+    detections: list[BandDetection], peak_threshold: float
+) -> BandDetection:
+    """Combine N per-burst detections → single BandDetection.
+
+    The aggregate `peak_norm` is the **median** of per-burst peaks (same
+    estimator as the center PTS) so the gate signal and the timestamp come
+    from the same source. The center PTS is the median over **only** the
+    bursts whose peak cleared `peak_threshold`; sub-floor bursts include
+    out-of-window misses that `detect_band_windowed` fills with a fabricated
+    `center_pts_s` (peak=0), and letting those into the median drags the
+    timestamp toward an invented position — a silent false sync. If no burst
+    clears the floor, fall back to all bursts (the median peak will then be
+    sub-floor too, so the caller's gate sees an honest weak signal rather
+    than a mean inflated by one clean burst).
+
+    Trace comes from the last entry (empty from windowed detection) for
+    API compat."""
     if not detections:
         raise ValueError("empty detections list")
-    centers = [d.center_pts_s for d in detections]
+    strong = [d for d in detections if d.peak_norm >= peak_threshold]
+    center_pool = strong if strong else detections
+    centers = [d.center_pts_s for d in center_pool]
     peaks = [d.peak_norm for d in detections]
     psrs = [d.psr for d in detections]
     return BandDetection(
         center_pts_s=float(np.median(centers)),
-        peak_norm=float(np.mean(peaks)),
+        peak_norm=float(np.median(peaks)),
         psr=float(np.mean(psrs)),
         trace=detections[-1].trace,
     )
@@ -238,7 +258,7 @@ def detect_sync_report(
     emit_at_s_self: list[float],
     emit_at_s_other: list[float],
     search_window_s: float = 0.3,
-    expected_sample_rate: int | None = None,
+    peak_threshold: float = SYNC_TRACE_THRESHOLD,
 ) -> tuple[SyncReport, dict[str, float]]:
     """Turn one cam's uploaded WAV + metadata into a `SyncReport` ready
     to feed `State.record_sync_report`.
@@ -272,8 +292,8 @@ def detect_sync_report(
                                      audio_start_pts_s, emit_at_s_self, search_window_s)
     dets_other = detect_band_windowed(audio, sample_rate, ref_other,
                                       audio_start_pts_s, emit_at_s_other, search_window_s)
-    det_self = _median_band_detection(dets_self)
-    det_other = _median_band_detection(dets_other)
+    det_self = _median_band_detection(dets_self, peak_threshold)
+    det_other = _median_band_detection(dets_other, peak_threshold)
     n_burst = len(emit_at_s_self)
 
     t_self_s = det_self.center_pts_s
@@ -305,7 +325,11 @@ def detect_sync_report(
         "psr_self": float(psr_self),
         "psr_other": float(psr_other),
         "n_burst": n_burst,
-        "windowed": emit_at_s_self is not None and emit_at_s_other is not None,
+        # How many of the N bursts per band cleared `peak_threshold` and thus
+        # contributed to the median timestamp. Low counts (vs n_burst) mean
+        # the median rests on few clean bursts — a weak-detection signal.
+        "strong_self": float(sum(d.peak_norm >= peak_threshold for d in dets_self)),
+        "strong_other": float(sum(d.peak_norm >= peak_threshold for d in dets_other)),
     }
     return report, debug
 
@@ -317,6 +341,7 @@ def detect_quick_sync_report(
     audio_start_pts_s: float,
     emit_at_s: list[float],
     search_window_s: float = 0.3,
+    peak_threshold: float = SYNC_TRACE_THRESHOLD,
 ) -> tuple["QuickSyncReport", dict[str, float]]:
     """Single-band quick-sync detection. Every listening phone — emitter
     included — matched-filters the ONE emitter band (band A) off its own
@@ -340,7 +365,7 @@ def detect_quick_sync_report(
     dets = detect_band_windowed(
         audio, sample_rate, ref, audio_start_pts_s, emit_at_s, search_window_s
     )
-    det = _median_band_detection(dets)
+    det = _median_band_detection(dets, peak_threshold)
 
     report = QuickSyncReport(
         camera_id=camera_id,
@@ -356,6 +381,9 @@ def detect_quick_sync_report(
         "peak": float(det.peak_norm),
         "psr": float(det.psr),
         "n_burst": len(emit_at_s),
+        # Bursts that cleared `peak_threshold` and contributed to the median
+        # anchor; low vs n_burst flags a weak detection (see detect_sync_report).
+        "strong": float(sum(d.peak_norm >= peak_threshold for d in dets)),
     }
     return report, debug
 

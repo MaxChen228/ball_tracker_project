@@ -160,6 +160,7 @@ async def sync_quick_audio_upload(
             "duration_s": debug["duration_s"],
             "sample_rate": debug["sample_rate"],
             "n_burst": debug["n_burst"],
+            "strong": debug["strong"],
             "wav_path": str(wav_path.relative_to(state.data_dir)),
         },
     }
@@ -298,7 +299,8 @@ async def sync_audio_upload(
             "duration_s": debug["duration_s"],
             "sample_rate": debug["sample_rate"],
             "n_burst": debug["n_burst"],
-            "windowed": debug["windowed"],
+            "strong_self": debug["strong_self"],
+            "strong_other": debug["strong_other"],
             "emission_pts_s": emission_pts_s,
             "wav_path": str(wav_path.relative_to(state.data_dir)),
         },
