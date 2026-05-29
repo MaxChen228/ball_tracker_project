@@ -79,13 +79,34 @@ iOS = server lockstep 部署，沒有多版本 client、沒有歷史資料保鮮
 
 ## Git / PR workflow
 
-**pre-push gate（雙人協作，clone 後跑一次）**：
-`git config core.hooksPath scripts/hooks`。`scripts/hooks/pre-push`
-依本次 push 改動智慧跑：`server/*.py` 改 → pytest；`*.swift` 改 →
-`xcodebuild build-for-testing`（編譯 test target，補 simulator `build`
-漏編 test 的洞）。繞過：`git push --no-verify`（全跳）或
-`BALL_TRACKER_SKIP_IOS=1`（只跳慢的 iOS build）。目的：`main` 永遠保持
-綠，不讓紅 CI 污染另一位協作者的基底。
+**多人協作（目前 3 人：MaxChen228 / Abner-chang / +1）。clone 後一次性
+setup**：
+```bash
+git config core.hooksPath scripts/hooks   # 啟用 pre-push gate
+git config pull.rebase true               # pull 自動 rebase，不生雜 merge commit
+git config push.autoSetupRemote true      # 開支線後直接 git push，免 -u
+git config fetch.prune true               # fetch 自動清已刪遠端分支殘影
+git config rerere.enabled true            # 衝突解法自動記憶
+```
+
+**核心紀律**：`main` 是唯一正式版，**沒人直接 commit / push main**，一律
+走「`git checkout -b` 支線 → `git push` → `gh pr create` → 至少 1 人
+approve → `gh pr merge --squash --delete-branch`」。開工前先
+`git checkout main && git pull`。merge 完即刪支線（別養墓園分支）。
+
+**分工沿不重疊的檔案層切**：`server/`（後端 py）/ `ball_tracker/`
+（iOS swift）/ `lab/`+`lab-fit/`（研究）各一人主守，衝突面最小。唯一
+共用地雷是跨端 wire schema（`docs/reference/protocols.md` SoT）——**改它
+前先在群組喊一聲**，否則另一端環境會突然爆掉。
+
+**branch protection（GitHub 端，防手滑正本）**：`main` 要求 PR + 1
+approval + CI（Server tests / iOS build）綠才能 merge，禁直接 push。
+
+**pre-push gate**：`scripts/hooks/pre-push` 依本次 push 改動智慧跑：
+`server/*.py` 改 → pytest；`*.swift` 改 → `xcodebuild build-for-testing`
+（編譯 test target，補 simulator `build` 漏編 test 的洞）。繞過：
+`git push --no-verify`（全跳）或 `BALL_TRACKER_SKIP_IOS=1`（只跳慢的
+iOS build）。目的：`main` 永遠保持綠，不讓紅 CI 污染其他協作者的基底。
 
 **merge PR 後立刻 pull main**：`gh pr merge` 成功後同一輪工具呼叫鏈加
 `git checkout main && git pull origin main`，不管 squash/merge/rebase。
