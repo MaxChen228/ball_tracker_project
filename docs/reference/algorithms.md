@@ -47,9 +47,16 @@ entry before serving traffic.
 ## Cost threshold — algorithm-owned
 
 `cost_threshold_for_algorithm(algorithm_id)` returns the per-algorithm
-pairing-cost gate, applied server-side in `pairing.py` **before**
-segmentation. The legacy operator-stamped `SessionResult.cost_threshold` is
-gone (b15a611 + bc0e92e); `POST /sessions/{sid}/recompute` accepts only
+pairing-cost gate. **`pairing.py` does NOT apply it** — pairing emits the
+full triangulated set, filtered only by the absolute emit ceilings
+(`_EMIT_COST_CEILING` / `_EMIT_GAP_CEILING_M`, disk/memory protection, not
+operator-tunable). The per-algorithm `cost_threshold` gate is applied
+**downstream** in `session_results._passes_stamped_filter`
+(`server/session_results.py:636`, resolved per path via
+`cost_threshold_for_algorithm`), alongside the operator's
+`gap_threshold_m`, before the segmenter consumes the points. The legacy
+operator-stamped `SessionResult.cost_threshold` is gone (b15a611 +
+bc0e92e); `POST /sessions/{sid}/recompute` accepts only
 `{gap_threshold_m: float}` now.
 
 ## Bucket-key convention
