@@ -17,9 +17,17 @@ Last verified: 2026-04-24.
 - **Device registry**: **Cam A + Cam B both online** (since 2026-04-22).
   Mutual sync / stereo triangulation is the normal path, not a degraded
   fallback.
-- **Chirp playback**: from the **Mac itself** (`/chirp.wav` → Mac
-  speakers). The two iPhones receive asymmetric SNR (different
-  distances to the Mac) — sync tuning must assume non-symmetric SNR.
+- **Chirp playback** — two paths, depending on which sync flow is run:
+  - **Legacy mutual sync**: from the **Mac itself** (`/chirp.wav` → Mac
+    speakers). The two iPhones receive asymmetric SNR (different
+    distances to the Mac) — sync tuning must assume non-symmetric SNR.
+  - **Quick sync (current)**: one iPhone is the **emitter** (the
+    `emitter_cam_id` passed to `POST /sync/quick_start`,
+    `routes/sync.py::sync_quick_start`) and plays a single band-A chirp;
+    every online cam (emitter included) listens and uploads its
+    recording. Phones are huddled <10cm at sync time so propagation
+    delay is negligible and intentionally NOT compensated. Re-verify
+    which flow the operator is using before reasoning about SNR.
 - **Network**: LAN has occasional drops. Heartbeat timeouts back off
   exponentially (2 s → max 32 s). iOS `PayloadUploadQueue` retries
   flush backlog automatically on recovery.

@@ -47,13 +47,13 @@
 
 - **`video`** (`video/quicktime`) — H.264 MOV. iOS uploads on every recording (PR61); `/pitch` stores it under `data/videos/session_{session_id}_{camera_id}.<ext>` without decoding. Decode + HSV detection (→ `frames_server_post` / `frames_by_algorithm[<algorithm_id>]`) happens only when the operator hits `POST /sessions/{sid}/runs/{algorithm_id}` (or its preset-name alias `POST /sessions/{sid}/run_server_post`).
 
-- **Live path has no HTTP payload** — the always-on `live` pipeline produces WS `frame` messages on `/ws/device/{cam}` throughout the recording. `state.persist_live_frames(camera_id, session_id)` flushes the in-memory buffer onto the pitch JSON at `path_completed` (or session end) so reloads see the same two-bucket shape as an offline upload.
+- **Live path has no HTTP payload** — the always-on `live` pipeline produces WS `frame` messages on the device's `/ws/device/{device_uuid}` socket (bound to a camera_id by the cam-id handshake) throughout the recording. `state.persist_live_frames(camera_id, session_id)` flushes the in-memory buffer onto the pitch JSON at `path_completed` (or session end) so reloads see the same two-bucket shape as an offline upload.
 
 Pairing is by **`session_id` alone** (server-minted via `POST /sessions/arm`). iPhones never generate pairing identifiers.
 
 `POST /sessions/arm` may omit `paths`, in which case the operator's runtime default is used. If a JSON body includes `paths`, it must be a non-empty array of known `DetectionPath` values; unknown values and empty arrays return 422 instead of falling back to defaults.
 
-`POST /sessions/arm` also accepts an optional `max_duration_s: float` (JSON body or form / query) — the auto-disarm timeout the server enforces and re-broadcasts in the WS `arm` push. Omitted → `_DEFAULT_SESSION_TIMEOUT_S` from `server/routes/sessions.py`.
+`POST /sessions/arm` also accepts an optional `max_duration_s: float` (JSON body or form / query) — the auto-disarm timeout the server enforces and re-broadcasts in the WS `arm` push. Omitted → `_DEFAULT_SESSION_TIMEOUT_S` (= `60.0`), defined in `server/schemas.py:748` and re-exported through `server/routes/sessions.py`.
 
 Triangulation requires **both** cameras to have `intrinsics` and `homography` present AND `sync_anchor_timestamp_s` non-null — if any is missing, `SessionResult.error` is set and triangulation is skipped (raw payload + MOV are still persisted for forensics).
 
@@ -143,9 +143,35 @@ Error matrix:
 
 Broadcasts a `fit` SSE with `cause: "active_run_switch"` so every open dashboard / viewer subscriber repaints the scene with the newly-active triangulation bucket without a page reload.
 
-## WebSocket messages — `/ws/device/{cam}`
+## WebSocket messages — `/ws/device/{device_uuid}`
 
-The phone holds one WS connection per camera for the lifetime of its app session. Inbound (server→iOS) carries control commands; outbound (iOS→server) carries liveness + the live frame stream. Handler: `server/routes/device_ws.py::ws_device`. Send helper: `server/ws.py::DeviceSocketManager.send` (logs cam id + message type on every drop so silent failures are auditable). Every message is a JSON object with a `type` discriminator.
+The phone connects to **`/ws/device/{device_uuid}`** (not `{cam}`) and holds one WS connection per device for the lifetime of its app session. The camera_id is **not** in the URL — it is resolved at connect-time by the cam-id handshake (below), after which the socket is bound to a camera_id in the active registry. Inbound (server→iOS) carries control commands; outbound (iOS→server) carries liveness + the live frame stream. Handler: `server/routes/device_ws.py::ws_device`. Send helper: `server/ws.py::DeviceSocketManager.send` (logs cam id + message type on every drop so silent failures are auditable). Every message is a JSON object with a `type` discriminator.
+
+### Connect-time cam-id handshake
+
+The URL carries an opaque `device_uuid` (iOS `identifierForVendor`), not a camera role. The server resolves `device_uuid → camera_id` before entering the normal command/frame flow. Handler: `server/routes/device_ws.py::ws_device` (handshake at `device_ws.py:109-188`); pending pool in `server/state_pending_devices.py`, persisted assignments in `server/state_device_assignments.py`.
+
+After `accept()`, the server looks up `state.assignment_for_device(device_uuid)`:
+
+- **Fast path** (already assigned) — server immediately sends `cam_id_assigned` (`device_ws.py:183`) and proceeds to the normal flow.
+- **Slow path** (not yet assigned) — server registers the socket in the pending pool, sends `cam_id_pending` (`device_ws.py:127`), and holds the socket. The operator then assigns the device a camera_id via `POST /devices/assign`; that fires the pending entry's event, the server sends `cam_id_assigned`, and proceeds. A stray inbound message or disconnect during pending mode closes the socket (1002 protocol error / clean disconnect). The lookup + pending-register pair runs with **no `await` between them** so a concurrent `/devices/assign` can never land in the gap and wake nothing (see `state_pending_devices.py` docstring).
+
+Handshake messages (server → iOS):
+
+```
+type: "cam_id_pending"      # slow path; holds socket awaiting operator assign
+device_uuid: str
+
+type: "cam_id_assigned"     # both paths; cam-id resolved, normal flow begins
+camera_id: str              # the resolved role ("A"/"B")
+device_uuid: str
+```
+
+**Operator-driven assignment endpoints** (`server/routes/devices.py`, surfaced on the `/setup` page at `server/main.py:695`):
+
+- `GET /devices/pool` (`devices.py:27`) — pending (unassigned, connected) devices + current assignments, for the setup UI.
+- `POST /devices/assign` (`devices.py:101`) — bind a `device_uuid` to a `camera_id`; wakes the pending socket → `cam_id_assigned`.
+- `POST /devices/unassign` (`devices.py:194`) — release a `device_uuid` from its camera_id.
 
 ### Server → iOS
 
@@ -155,7 +181,7 @@ Pushed on connect, on every `hello` from the phone, and on every dashboard-drive
 
 ```
 type: "settings"
-camera_id: str                       # echo of the {cam} in the URL (server-side cross-check)
+camera_id: str                       # the handshake-resolved camera_id this socket is bound to (server-side cross-check)
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
@@ -240,7 +266,7 @@ device_id: str | null                # identifierForVendor UUID (or "unknown-<uu
 device_model: str | null             # sysctl hw.machine ("iPhone15,3" etc.); ≤ 32 chars
 ```
 
-> **iOS-sent, server-ignored:** iOS also ships `cam` (camera role) and, when armed, `session_id`. The server already knows the cam from the WS URL path and the session id from `state.session_armed`, so both are accepted but unread. Kept for client-side debug visibility only.
+> **iOS-sent, server-ignored:** iOS also ships `cam` (camera role) and, when armed, `session_id`. The server already knows the cam from the handshake-bound camera_id (not the URL — that carries `device_uuid`) and the session id from `state.session_armed`, so both are accepted but unread. Kept for client-side debug visibility only.
 
 #### `type: "heartbeat"` — periodic liveness + telemetry
 
@@ -253,7 +279,7 @@ time_sync_id, sync_anchor_timestamp_s, battery_level, battery_state, device_id, 
 sync_telemetry: {…} | absent         # opaque to this doc; consumed by state._sync.record_sync_telemetry
 ```
 
-> **iOS-sent, server-ignored:** iOS also ships `cam` (camera role) and `t_session_s` (`CACurrentMediaTime()` at send time). Both are accepted but unread — the cam is already pinned by the WS URL path and the server stamps its own arrival time. Kept for client-side debug visibility only.
+> **iOS-sent, server-ignored:** iOS also ships `cam` (camera role) and `t_session_s` (`CACurrentMediaTime()` at send time). Both are accepted but unread — the cam is already pinned by the handshake-bound camera_id (the URL carries `device_uuid`, not the role) and the server stamps its own arrival time. Kept for client-side debug visibility only.
 
 #### `type: "frame"` — one detected frame
 
