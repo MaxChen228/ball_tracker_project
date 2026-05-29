@@ -46,16 +46,40 @@ def diagnose(sid: str, out_dir: Path) -> None:
 
     # ── A. Top-line counts ─────────────────────────────────────────────
     _sub("A. Top-line counts")
-    fc = result.get("frame_counts_by_path", {})
-    print("frame_counts_by_path (raw candidate-bearing frames per camera):")
+    from data_loader import algorithm_id_for_path
+    # Re-project current `*_by_algorithm` schema into a path-keyed view
+    # so downstream code keeps reading "live"/"server_post" tags. `_alg`
+    # returns None when a path has no algorithm registered — kept explicit
+    # (no `or ""` collapse) so a missing algorithm reads differently from
+    # "registered but zero frames" in the diagnostic output.
+    _alg = lambda p: algorithm_id_for_path(result, p)
+    fc_alg = result.get("frame_counts_by_algorithm", {})
+    tbp_alg = result.get("triangulated_by_algorithm", {})
+    sbp_alg = result.get("segments_by_algorithm", {})
+
+    def _by_path(by_alg, default):
+        out = {}
+        for p in ("live", "server_post"):
+            alg = _alg(p)
+            out[p] = default if alg is None else by_alg.get(alg, default)
+        return out
+
+    fc = _by_path(fc_alg, {})
+    tbp = _by_path(tbp_alg, [])
+    sbp = _by_path(sbp_alg, [])
+    print("frame_counts (raw candidate-bearing frames per camera):")
     for path, by_cam in fc.items():
-        print(f"  {path:12s}: A={by_cam.get('A', 0):5d}  B={by_cam.get('B', 0):5d}")
-    tbp = result.get("triangulated_by_path", {})
-    print("triangulated_by_path:")
+        if _alg(path) is None:
+            print(f"  {path:12s}: <no algorithm registered>")
+        elif by_cam:
+            per_cam = "  ".join(f"{c}={by_cam[c]:5d}" for c in sorted(by_cam))
+            print(f"  {path:12s}: {per_cam}")
+        else:
+            print(f"  {path:12s}: (no frames)")
+    print("triangulated:")
     for path, pts in tbp.items():
         print(f"  {path:12s}: {len(pts):5d} points")
-    sbp = result.get("segments_by_path", {})
-    print("segments_by_path:")
+    print("segments:")
     for path, segs in sbp.items():
         print(f"  {path:12s}: {len(segs):5d} segments")
     print(f"gap_threshold_m: {result.get('gap_threshold_m')}")
@@ -207,7 +231,12 @@ def _make_plots(sid: str, result: dict, out_dir: Path) -> None:
         print("\n[plot] matplotlib not available — skipping plots")
         return
 
-    tbp = result.get("triangulated_by_path", {})
+    from data_loader import algorithm_id_for_path
+    tbp_alg = result.get("triangulated_by_algorithm", {})
+    tbp = {
+        p: tbp_alg.get(algorithm_id_for_path(result, p) or "", [])
+        for p in ("live", "server_post")
+    }
     gap_thr = result["gap_threshold_m"]
 
     for path in ("live", "server_post"):

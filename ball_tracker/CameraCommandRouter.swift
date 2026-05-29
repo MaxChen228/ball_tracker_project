@@ -31,6 +31,12 @@ final class CameraCommandRouter {
         let startStandbyCapture: () -> Void
         let stopCapture: () -> Void
         let getCalCaptureState: () -> CalCaptureState
+        /// Mirror of `getCalCaptureState != .idle` for the ChArUco
+        /// IntrinsicsCalibrationViewController flow — same WS commands
+        /// must be rejected while the VC owns the camera. Independent
+        /// flag (not folded into CalCaptureState) so the 12 MP swap
+        /// state machine isn't accidentally driven by VC presentation.
+        let getIntrinsicsCalibrationActive: () -> Bool
         let armCalibrationCapture: () -> Bool
     }
 
@@ -64,7 +70,7 @@ final class CameraCommandRouter {
         // root cause of the prior 12 MP swap revert. sync_run starts an
         // audio chirp window; chirp detection is dead while the AV session
         // is stopped for the swap, so reject it for the same reason.
-        let calIdle = deps.getCalCaptureState() == .idle
+        let calIdle = deps.getCalCaptureState() == .idle && !deps.getIntrinsicsCalibrationActive()
 
         switch type {
         case "sync_run":
@@ -267,6 +273,27 @@ final class CameraCommandRouter {
             }
             applyCalibrationFrameRequest(calFrameRequested)
             DispatchQueue.main.async { self.deps.refreshModeLabel() }
+        case "cam_id_pending":
+            // Phase 0 PR3 device-uuid handshake: server has no assignment
+            // for this device yet. iOS sits idle on the WS until the
+            // dashboard operator promotes us via /devices/assign and the
+            // server sends `cam_id_assigned`. No state mutation needed —
+            // the post-handshake flow (settings / arm / etc.) simply
+            // hasn't started yet. Log for diagnosis.
+            let uuid = (message["device_uuid"] as? String) ?? "?"
+            commandLog.info("ws cam_id_pending device_uuid=\(uuid, privacy: .public) — awaiting dashboard assignment")
+        case "cam_id_assigned":
+            // Server resolved (or just resolved) device_uuid → camera_id.
+            // The cached `cameraRole` UserDefaults value is the local
+            // label; if it disagrees with what the server assigned, the
+            // server's value is authoritative for the live session. This
+            // log lets operators spot a mismatch before relabelling the
+            // device. Future PR: thread the assigned value back into the
+            // coordinator so the cameraRole field becomes server-driven
+            // rather than UserDefaults-driven.
+            let assignedCam = (message["camera_id"] as? String) ?? "?"
+            let uuid = (message["device_uuid"] as? String) ?? "?"
+            commandLog.info("ws cam_id_assigned device_uuid=\(uuid, privacy: .public) camera_id=\(assignedCam, privacy: .public) local=\(self.deps.getCameraRole(), privacy: .public)")
         default:
             break
         }

@@ -4,29 +4,35 @@ Single source of truth for "where is the data" — everything else under
 lab-fit/ goes through here.
 
 Usage:
-    from data_loader import DATA_DIR, load_result, load_pitches, list_sessions
+    from data_loader import DATA_DIR, load_result, list_sessions
 
     for sid in list_sessions():
         result = load_result(sid)
         ...
 
 A `Result` is the dict from `data/results/session_<sid>.json` with these
-top-level keys (Python-side names match disk schema):
+top-level keys (current schema, post `triangulated_by_algorithm`
+migration):
 
-    triangulated         : list of dicts with t_rel_s, x_m, y_m, z_m,
-                           residual_m, source_a_cand_idx, source_b_cand_idx,
-                           cost_a, cost_b
-    triangulated_by_path : {"live": [...], "server_post": [...]}
-    segments             : flattened segments list (already dedupe+merge)
-    segments_by_path     : {"live": [...], "server_post": [...]}
-    frame_counts_by_path : {"live": {"A": int, "B": int}, ...}
-    gap_threshold_m      : residual filter cutoff used at solve time
-    cost_threshold       : candidate cost cutoff
-    hsv_range_used       : frozen HSV used by server_post
-    shape_gate_used      : frozen shape gate used by server_post
+    triangulated                    : authority-path flat list (legacy
+                                      mirror)
+    points                          : alias of triangulated
+    triangulated_by_algorithm       : {alg_id: [TriPoint dicts]}, keys
+                                      include LIVE_ALGORITHM_ID
+                                      ("ios_capture_time") and the active
+                                      server-post algo id
+                                      (e.g. "v11_hsv_cc")
+    segments                        : authority-path segments (legacy)
+    segments_by_algorithm           : {alg_id: [segment dicts]}
+    frame_counts_by_algorithm       : {alg_id: {cam_id: int}}  (N-cam)
+    active_server_post_algorithm_id : the SVR algo id currently active
+    algorithms_completed            : list of alg ids that have data
+    gap_threshold_m                 : residual filter cutoff at solve time
+    cost_threshold                  : candidate cost cutoff (may be None)
 
 A `PitchPayload` is `data/pitches/session_<sid>_<cam>.json`. Has live
-and server_post candidate frames per camera (frames_live, frames_server_post).
+and server_post candidate frames per camera (frames_live,
+frames_server_post).
 """
 
 from __future__ import annotations
@@ -40,6 +46,9 @@ DATA_DIR = Path(__file__).parent.parent / "server" / "data"
 RESULTS_DIR = DATA_DIR / "results"
 PITCHES_DIR = DATA_DIR / "pitches"
 VIDEOS_DIR = DATA_DIR / "videos"
+
+# Algorithm id that backs the LIVE path. Mirrors server-side naming.
+LIVE_ALGORITHM_ID = "ios_capture_time"
 
 _RESULT_RE = re.compile(r"^session_(s_[a-f0-9]+)\.json$")
 _PITCH_RE = re.compile(r"^session_(s_[a-f0-9]+)_([AB])\.json$")
@@ -75,3 +84,20 @@ def session_has_pitch(sid: str, cam: str) -> bool:
 def iter_results() -> Iterator[tuple[str, dict]]:
     for sid in list_sessions():
         yield sid, load_result(sid)
+
+
+def algorithm_id_for_path(result: dict, path: str) -> str | None:
+    """Resolve a logical path ("live"/"server_post") to its algorithm id
+    in `triangulated_by_algorithm` / `segments_by_algorithm`.
+
+    Returns None when the result has no points for that path."""
+    if path == "live":
+        if LIVE_ALGORITHM_ID in result.get("triangulated_by_algorithm", {}):
+            return LIVE_ALGORITHM_ID
+        return None
+    if path == "server_post":
+        alg = result.get("active_server_post_algorithm_id")
+        if alg and alg in result.get("triangulated_by_algorithm", {}):
+            return alg
+        return None
+    raise ValueError(f"unknown path: {path!r}")

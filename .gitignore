@@ -59,6 +59,7 @@ server/data/calibrations/
 server/data/intrinsics/
 server/data/gt/
 server/data/sync_audio/
+server/data/migrations/
 server/data/*.json
 /data/
 

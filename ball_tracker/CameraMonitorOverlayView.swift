@@ -16,6 +16,10 @@ final class CameraMonitorOverlayView {
 
     var onRoleChanged: (() -> Void)?
     var onIPTapped: (() -> Void)?
+    /// Fires when the operator taps the「Calibrate」chip. Host presents
+    /// the ChArUco IntrinsicsCalibrationViewController. Wired in
+    /// CameraViewController.setupUI().
+    var onCalibrateTapped: (() -> Void)?
 
     // MARK: - Private
 
@@ -88,10 +92,24 @@ final class CameraMonitorOverlayView {
 
         topStatusChip.translatesAutoresizingMaskIntoConstraints = false
 
+        // ChArUco intrinsics calibration entry. Single in-app functional
+        // flow; replaces the old Mac CLI (server/calibrate_intrinsics.py
+        // — deleted in the same refactor).
+        let calibrateButton = UIButton(type: .system)
+        calibrateButton.setTitle("Calibrate", for: .normal)
+        calibrateButton.titleLabel?.font = DesignTokens.Fonts.mono(size: 12, weight: .medium)
+        calibrateButton.setTitleColor(DesignTokens.Colors.ink, for: .normal)
+        calibrateButton.layer.cornerRadius = DesignTokens.CornerRadius.chipSmall
+        calibrateButton.layer.borderWidth = 1
+        calibrateButton.layer.borderColor = DesignTokens.Colors.cardBorder.cgColor
+        calibrateButton.contentEdgeInsets = .init(top: 4, left: 10, bottom: 4, right: 10)
+        calibrateButton.addTarget(self, action: #selector(handleCalibrateTapped), for: .touchUpInside)
+
         let row1 = UIStackView(arrangedSubviews: [
             roleStack,
             UIView(),   // flexible spacer
             ledGroup,
+            calibrateButton,
             topStatusChip,
         ])
         row1.axis = .horizontal
@@ -248,6 +266,8 @@ final class CameraMonitorOverlayView {
     }
 
     @objc private func handleIPTapped() { onIPTapped?() }
+
+    @objc private func handleCalibrateTapped() { onCalibrateTapped?() }
 
     private func _startRecTimer() {
         recStartTime = CACurrentMediaTime()

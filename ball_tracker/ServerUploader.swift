@@ -506,6 +506,112 @@ final class ServerUploader: @unchecked Sendable {
         }
     }
 
+    /// POST a ChArUco-solved per-device intrinsics record to the server.
+    /// Maps `IntrinsicsPendingRecord` onto the wire shape declared at
+    /// `server/schemas.py:643` (`DeviceIntrinsics`). The server route at
+    /// `routes/calibration_intrinsics.py:65` overrides `device_id` from
+    /// the URL path, but we send it in the body too for symmetry — it's
+    /// validated to match the path.
+    func postIntrinsics(
+        deviceId: String,
+        record: IntrinsicsPendingRecord,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard let base = config.baseURL() else {
+            completion(.failure(NSError(domain: "ServerUploader", code: -1,
+                                        userInfo: [NSLocalizedDescriptionKey: "invalid base URL"])))
+            return
+        }
+        let url = base.appendingPathComponent("calibration/intrinsics/\(deviceId)")
+
+        // Wire shape mirrors DeviceIntrinsics (camelCase → snake_case).
+        let body: [String: Any] = [
+            "device_id": record.deviceId,
+            "device_model": record.deviceModel,
+            "source_width_px": record.sourceWidthPx,
+            "source_height_px": record.sourceHeightPx,
+            "intrinsics": [
+                "fx": record.fx,
+                "fy": record.fy,
+                "cx": record.cx,
+                "cy": record.cy,
+                "distortion": record.distortion,
+            ] as [String: Any],
+            "rms_reprojection_px": record.rmsReprojectionPx,
+            "n_images": record.nImages,
+            "calibrated_at": record.calibratedAt,
+            "source_label": record.sourceLabel,
+        ]
+
+        postJSON(url: url, body: body, completion: completion)
+    }
+
+    /// Trigger a server-side auto-cal solve for the given role (camera_id).
+    /// Fire-and-forget from the calibration-flow caller's POV: failure
+    /// just means the dashboard auto-cal didn't refresh on its own;
+    /// operator can click "Auto calibrate" manually.
+    func postAutoCalibrate(
+        cameraRole: String,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard let base = config.baseURL() else {
+            completion?(.failure(NSError(domain: "ServerUploader", code: -1,
+                                         userInfo: [NSLocalizedDescriptionKey: "invalid base URL"])))
+            return
+        }
+        let url = base.appendingPathComponent("calibration/auto/\(cameraRole)")
+        postJSON(url: url, body: [:], completion: completion ?? { _ in })
+    }
+
+    /// Shared JSON POST helper. 4xx and 5xx both map to .failure with an
+    /// NSError carrying the status code — caller branches on the code
+    /// when retry policy matters.
+    private func postJSON(
+        url: URL,
+        body: [String: Any],
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        } catch {
+            completion(.failure(error))
+            return
+        }
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            // A nil error with no HTTPURLResponse must NOT be treated as
+            // success — that silently signals "upload landed" when nothing
+            // was actually POSTed (mocked session, non-HTTP scheme, race).
+            // Mirror the multipart upload path's guard above.
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "no HTTPURLResponse"]
+                )))
+                return
+            }
+            if !(200...299).contains(http.statusCode) {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
+                )))
+                return
+            }
+            completion(.success(()))
+        }.resume()
+    }
+
 }
 
 extension ServerUploader.UploadError {

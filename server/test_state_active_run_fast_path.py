@@ -55,16 +55,19 @@ def _snapshot(alg_id: str) -> DetectionConfigSnapshotPayload:
 class _FakeTriangulatePair:
     """Deterministic stub: emits two points keyed off the alg's
     first frame_index. Records every call so tests can assert the
-    fast path never invokes it."""
+    fast path never invokes it. As of Phase 4-2 the rebuild path's
+    triangulation entry point is `triangulate_all_pairs_for_session`
+    (N-cam); signature: (state, pitches_by_cam: dict, *, source)."""
     def __init__(self) -> None:
         self.calls: list[int] = []
 
-    def __call__(self, state, a, b, *, source: str = "server"):
-        if not a.frames_server_post:
-            return []
-        marker = a.frames_server_post[0].frame_index
+    def __call__(self, state, pitches_by_cam, *, source: str = "server"):
+        any_pitch = next(iter(pitches_by_cam.values()))
+        if not any_pitch.frames_server_post:
+            return [], []
+        marker = any_pitch.frames_server_post[0].frame_index
         self.calls.append(marker)
-        return [
+        pts = [
             TriangulatedPoint(
                 t_rel_s=float(i) * 0.1,
                 x_m=float(marker), y_m=0.0, z_m=0.0,
@@ -73,6 +76,7 @@ class _FakeTriangulatePair:
             )
             for i in range(2)
         ]
+        return pts, []
 
 
 def _register_fake_v12(monkeypatch) -> None:
@@ -174,7 +178,7 @@ def test_fast_path_dual_cam_skips_triangulate(monkeypatch, tmp_path):
     triangulate_pair — the cached buckets are invariant under pure
     pointer flips. This is the core perf claim."""
     fake = _FakeTriangulatePair()
-    monkeypatch.setattr(session_results, "triangulate_pair", fake)
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", fake)
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")
     fake.calls.clear()  # Drop initial rebuild's calls.
@@ -198,7 +202,7 @@ def test_fast_path_output_equals_rebuild_dual_cam(monkeypatch, tmp_path):
     cache hit was eligible — exactly the silent divergence
     CLAUDE.md's no-silent-fallback rule guards against."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")
@@ -223,7 +227,7 @@ def test_mono_session_falls_back_to_rebuild(monkeypatch, tmp_path):
     eligibility; rebuild's mono branch adds the new active alg to
     `algorithms_completed` without triangulating."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _build_mono_session(s, monkeypatch, "s_a10ce")
@@ -236,12 +240,12 @@ def test_mono_session_falls_back_to_rebuild(monkeypatch, tmp_path):
 
 
 def test_sync_error_falls_back_to_rebuild(monkeypatch, tmp_path):
-    """Mismatched `sync_id` between A and B trips `validate_pair_sync`.
+    """Mismatched `sync_id` between A and B trips `validate_session_sync`.
     Fast path skips this case (cached bucket points were computed
     pre-sync-break and may not reflect the current pair-rejection
     semantics); rebuild surfaces `result.error`."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _register_fake_v12(monkeypatch)
@@ -273,7 +277,7 @@ def test_missing_bucket_falls_back_to_rebuild(monkeypatch, tmp_path):
     Fast path must defer to rebuild — the canonical path is where
     re-triangulation (and re-raising) belongs."""
     fake = _FakeTriangulatePair()
-    monkeypatch.setattr(session_results, "triangulate_pair", fake)
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", fake)
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")
     # Drop the cached v11 bucket so eligibility check fails.
@@ -311,7 +315,7 @@ def test_set_active_does_not_clobber_concurrent_record(monkeypatch, tmp_path):
     LATEST in-memory pitch; everything else from the racing record() must
     survive."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")
@@ -367,7 +371,7 @@ def test_set_active_unlinks_orphan_disk_file_when_cam_pitch_deleted(
     then verifies the cam-A pitch file is unlinked when set_active
     finishes."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")
@@ -413,7 +417,7 @@ def test_set_active_repersists_merged_pitch(monkeypatch, tmp_path):
     Verifies the second-round write actually occurred by counting writes
     for the cam-A pitch path."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")
@@ -463,7 +467,7 @@ def test_prior_result_reference_not_mutated(monkeypatch, tmp_path):
     guards against in-flight SSE serializers / `/results/{sid}` GETs
     observing a half-stamped object."""
     monkeypatch.setattr(
-        session_results, "triangulate_pair", _FakeTriangulatePair(),
+        session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair(),
     )
     s = main.State(data_dir=tmp_path)
     _build_dual_cam_session(s, monkeypatch, "s_fa57")

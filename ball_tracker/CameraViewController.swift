@@ -763,6 +763,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         overlayView.onIPTapped = { [weak self] in
             self?.showIPEditAlert()
         }
+        overlayView.onCalibrateTapped = { [weak self] in
+            self?.presentIntrinsicsCalibration()
+        }
         statusPresenter = CameraStatusPresenter(
             topStatusChip: overlayView.topStatusChip,
             warningLabel: overlayView.warningLabel,
@@ -792,6 +795,55 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self.applyUpdatedSettings()
         })
         present(alert, animated: true)
+    }
+
+    /// Hand off the back camera to the ChArUco intrinsics flow.
+    /// AVCaptureSession ownership swap: pause runtime first, set the
+    /// command-router gate flag, present modal. On dismiss reverse the
+    /// order. If the upload succeeded, fire a delayed `/calibration/auto/{cam}`
+    /// so the dashboard auto-cal picks up the fresh ChArUco K without
+    /// the operator having to click it manually.
+    private func presentIntrinsicsCalibration() {
+        let role = overlayView.selectedCameraRole
+        transportCoordinator.setIntrinsicsCalibrationActive(true)
+        captureRuntime.pauseSession()
+
+        let vc = IntrinsicsCalibrationViewController(uploader: uploader, cameraRole: role)
+        // Block interactive swipe-dismiss and route any non-onFinished
+        // teardown (system dismissal, host pop) through the same restore
+        // path — otherwise the camera stays paused and WS commands stay
+        // gated until app relaunch.
+        vc.isModalInPresentation = true
+        vc.presentationController?.delegate = self
+        vc.onFinished = { [weak self] uploaded in
+            guard let self else { return }
+            self.restoreCameraAfterIntrinsics()
+            guard uploaded else { return }
+            // Delay matches the plan: give runtime ~1s to repopulate its
+            // frame buffer before server tries to pull a calibration frame.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.uploader.postAutoCalibrate(cameraRole: role) { result in
+                    if case .failure(let err) = result {
+                        // Don't surface to operator — auto-cal can be retried
+                        // from the dashboard. This is best-effort chaining.
+                        Logger(subsystem: "com.Max0228.ball-tracker",
+                                category: "intrinsics.vc")
+                            .warning("postAutoCalibrate after charuco upload failed: \(err.localizedDescription, privacy: .public)")
+                    }
+                }
+            }
+        }
+        present(vc, animated: true)
+    }
+
+    /// Reverse `presentIntrinsicsCalibration`'s ownership swap: resume the
+    /// runtime session and clear the command-router gate. Idempotent — the
+    /// `getIntrinsicsCalibrationActive` guard makes a double-invoke (e.g.
+    /// onFinished plus a presentation-dismiss delegate callback) a no-op.
+    private func restoreCameraAfterIntrinsics() {
+        guard transportCoordinator.getIntrinsicsCalibrationActive() else { return }
+        captureRuntime.resumeSession()
+        transportCoordinator.setIntrinsicsCalibrationActive(false)
     }
 
     private func roleControlChanged() {
@@ -924,4 +976,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionPool.reset()
     }
 
+}
+
+extension CameraViewController: UIAdaptivePresentationControllerDelegate {
+    /// Fires on any non-programmatic dismissal of the intrinsics modal
+    /// (the swipe gesture is blocked by `isModalInPresentation`, but a
+    /// system-driven teardown can still reach here). Restore the camera
+    /// so the runtime doesn't stay paused with WS commands gated off.
+    /// `restoreCameraAfterIntrinsics` is idempotent, so this is harmless
+    /// even if `onFinished` already ran.
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        restoreCameraAfterIntrinsics()
+    }
 }

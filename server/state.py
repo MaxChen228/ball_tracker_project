@@ -1465,6 +1465,28 @@ class State:
                 device_model=device_model,
             )
 
+    def set_device_sync_anchor(
+        self, camera_id: str, anchor_pts_s: float, sync_id: str
+    ) -> None:
+        """Stamp a quick-sync anchor onto the device registry so
+        `LivePairingSession`'s anchor-relative window math
+        (`own_t = frame.timestamp_s - sync_anchor_timestamp_s`) sees it.
+
+        Reuses the exact field iOS heartbeats populate via the legacy
+        mutual chirp — same `time_synced` / `time_sync_id` /
+        `sync_anchor_timestamp_s` contract, same namespace. `heartbeat`
+        preserves prior battery / device-identity, so applying an anchor
+        does NOT clobber the role→hardware mapping the intrinsics lookup
+        depends on. Last writer wins: a later mutual chirp (or re-applied
+        quick sync) overwrites this, which is the intended operator
+        semantics — whichever sync ran most recently is authoritative."""
+        self.heartbeat(
+            camera_id,
+            time_synced=True,
+            time_sync_id=sync_id,
+            sync_anchor_timestamp_s=anchor_pts_s,
+        )
+
     def touch_device_last_seen(self, camera_id: str) -> None:
         """Freshen `Device.last_seen_at` WITHOUT touching time-sync state.
 

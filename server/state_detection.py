@@ -562,21 +562,24 @@ def set_active_server_post_algorithm(
             persist_pitch_json(pitch),
         )
 
-    # Fast-path eligibility: dual-cam, no sync error, cached result
-    # has the target alg's triangulated bucket. Everything else
-    # falls through to the canonical rebuild. `validate_pair_sync`
-    # grabs `self._lock` itself, so this block must stay outside the
+    # Fast-path eligibility: N≥2 cams, no sync error across every
+    # participating cam, cached result has the target alg's triangulated
+    # bucket, and the post-flip frozen config + active-pointer state
+    # agrees across every cam. Anything else falls through to canonical
+    # rebuild. `validate_session_sync` / `stamp_active_pointer_projection`
+    # grab `state._lock` themselves, so this block must stay outside the
     # publish lock above (Lock() is not re-entrant).
-    a_pitch = next((p for p in new_pitches if p.camera_id == "A"), None)
-    b_pitch = next((p for p in new_pitches if p.camera_id == "B"), None)
+    expected_cams = state.expected_camera_ids()
     with state._lock:
+        pitches_by_cam = session_results.pitches_by_cam_for_session(
+            state, session_id, expected_cams,
+        )
         cached = state.results.get(session_id)
     fast_path = (
         cached is not None
-        and a_pitch is not None
-        and b_pitch is not None
+        and len(pitches_by_cam) >= 2
         and algorithm_id in cached.triangulated_by_algorithm
-        and session_results.validate_pair_sync(state, a_pitch, b_pitch) is None
+        and session_results.validate_session_sync(state, pitches_by_cam) is None
     )
     if fast_path:
         # Copy-mutate-swap: avoid in-place mutation on the
@@ -585,9 +588,18 @@ def set_active_server_post_algorithm(
         # `stamp_segments_on_result` mutates dicts in place, so
         # the deep copy isolates the work.
         result = cached.model_copy(deep=True)
-        session_results.stamp_active_pointer_projection(
-            result, a_pitch, b_pitch,
-        )
+        try:
+            session_results.stamp_active_pointer_projection(
+                result, pitches_by_cam,
+            )
+        except (
+            session_results.PitchConfigDivergenceError,
+            session_results.ServerPostPointerMismatchError,
+        ):
+            # Divergence post-flip means some cam still holds a stale
+            # pointer / frozen snapshot; fall through to canonical
+            # rebuild which records the abort_reason explicitly.
+            result = session_results.rebuild_result_for_session(state, session_id)
     else:
         result = session_results.rebuild_result_for_session(state, session_id)
 
