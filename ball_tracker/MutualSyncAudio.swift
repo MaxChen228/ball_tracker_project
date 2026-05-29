@@ -182,7 +182,7 @@ final class MutualSyncAudio {
             ) { [weak self] buffer, when in
                 self?.ingestTapBuffer(buffer, at: when)
             }
-            self.tapInstalled = true
+            stateQueue.sync { self.tapInstalled = true }
 
             try engine.start()
         } catch {
@@ -194,8 +194,10 @@ final class MutualSyncAudio {
             return
         }
 
-        self.engine = engine
-        self.player = player
+        stateQueue.sync {
+            self.engine = engine
+            self.player = player
+        }
 
         // Synthesise the emission buffer in the player's connected format
         // so `scheduleBuffer` doesn't need an extra converter stage.
@@ -218,7 +220,10 @@ final class MutualSyncAudio {
         for (idx, offset) in emitOffsets.enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + offset) { [weak self] in
                 guard let self else { return }
-                guard let player = self.player, let engine = self.engine, engine.isRunning else {
+                // Read node handles under stateQueue — teardown may have
+                // cleared them concurrently on another context.
+                let (player, engine) = self.stateQueue.sync { (self.player, self.engine) }
+                guard let player, let engine, engine.isRunning else {
                     if idx == emitOffsets.count - 1 { onEmitted?() }
                     return
                 }
@@ -370,19 +375,24 @@ final class MutualSyncAudio {
     }
 
     private func teardown() {
-        if let player = self.player {
-            if player.isPlaying { player.stop() }
+        // Pull-and-clear the AV node handles under stateQueue so two teardown
+        // arrivals (endSync vs watchdog-driven finishRecording, on different
+        // contexts) can't double-stop / double-removeTap an already-nil node.
+        // AV stop/removeTap runs *outside* the lock — only the handle swap is
+        // serialised. (No teardown caller holds stateQueue, so .sync is safe.)
+        let (player, engine, hadTap) = stateQueue.sync { () -> (AVAudioPlayerNode?, AVAudioEngine?, Bool) in
+            let p = self.player
+            let e = self.engine
+            let t = self.tapInstalled
+            self.player = nil
+            self.engine = nil
+            self.tapInstalled = false
+            self.currentEmittedRole = nil
+            return (p, e, t)
         }
-        if let engine = self.engine, tapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-        }
-        tapInstalled = false
-        if let engine = self.engine, engine.isRunning {
-            engine.stop()
-        }
-        self.player = nil
-        self.engine = nil
-        stateQueue.sync { currentEmittedRole = nil }
+        if let player, player.isPlaying { player.stop() }
+        if let engine, hadTap { engine.inputNode.removeTap(onBus: 0) }
+        if let engine, engine.isRunning { engine.stop() }
 
         do {
             try AVAudioSession.sharedInstance().setActive(
