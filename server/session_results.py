@@ -27,7 +27,7 @@ from detection_paths import (
     pitch_with_algorithm_frames,
     pitch_with_path_frames,
 )
-from pairing import scale_pitch_to_video_dims, triangulate_pair_rays
+from pairing import scale_pitch_to_video_dims, triangulate_all_pairs, triangulate_pair_rays
 from schemas import (
     DetectionPath,
     FramePayload,
@@ -202,14 +202,83 @@ def triangulate_pair(
     return triangulate_pair_rays(a_scaled, b_scaled, source=source)
 
 
+def pitches_by_cam_for_session(
+    state: "State", session_id: str, expected_cams: list[str],
+) -> dict[str, PitchPayload]:
+    """Snapshot every camera's PitchPayload for `session_id`. The N-cam
+    replacement for the old `(a, b) = state.pitches.get(("A", sid)),
+    state.pitches.get(("B", sid))` pattern. Iterates `expected_cams` so a
+    third (or fourth) phone whose pitch landed via `/pitch` is picked up
+    by every result rebuild downstream.
+
+    Caller takes `state._lock` and MUST pass a precomputed
+    `expected_cams` (from `state.expected_camera_ids()`, resolved BEFORE
+    acquiring the lock). `expected_camera_ids()` acquires `_lock`
+    internally and `_lock` is non-reentrant — resolving it inside this
+    function while the caller holds the lock self-deadlocks."""
+    out: dict[str, PitchPayload] = {}
+    for cam in expected_cams:
+        p = state.pitches.get((cam, session_id))
+        if p is not None:
+            out[cam] = p
+    return out
+
+
+def _representative_pair(
+    pitches_by_cam: dict[str, PitchPayload],
+) -> tuple[PitchPayload | None, PitchPayload | None]:
+    """Pick the first two cams (lex-sorted) for helpers that still operate
+    on a representative pair — config aggregation, frozen-pointer
+    resolution, etc. N=2 yields (A, B) exactly; N=3 also yields (A, B)
+    so the existing aggregation policy is preserved bit-for-bit; cams
+    beyond the second are ignored by those helpers (divergence among
+    3+ cams is operator error and the existing A/B warning surface is
+    sufficient diagnostic until a future multi-cam config UI lands)."""
+    cams = sorted(pitches_by_cam.keys())
+    first = pitches_by_cam[cams[0]] if cams else None
+    second = pitches_by_cam[cams[1]] if len(cams) >= 2 else None
+    return first, second
+
+
+def triangulate_all_pairs_for_session(
+    state: "State",
+    pitches_by_cam: dict[str, PitchPayload],
+    *, source: str = "server",
+) -> list[TriangulatedPoint]:
+    """N-cam triangulation wrapper. Scales each pitch's intrinsics +
+    homography to its MOV grid (existing `scale_pitch_to_video_dims`),
+    delegates to `pairing.triangulate_all_pairs` for the C(N,2) fan-out,
+    and returns a flat list sorted by `t_rel_s`. Each point carries its
+    own `pair_key` (stamped by `triangulate_pair_rays`).
+
+    N=2 collapses to one pair, producing output identical to the
+    pre-N-cam single-pair `triangulate_pair` call (modulo the `pair_key`
+    field already required since Phase 3a).
+
+    Pairs whose cam lacks calibration are skipped + logged inside
+    `triangulate_all_pairs` — no silent zero-fill."""
+    scaled: dict[str, PitchPayload] = {}
+    with state._lock:
+        cals = {cam: state._calibration_store.get(cam) for cam in pitches_by_cam}
+    for cam, pitch in pitches_by_cam.items():
+        cal = cals.get(cam)
+        dims = (cal.image_width_px, cal.image_height_px) if cal else None
+        scaled[cam] = scale_pitch_to_video_dims(pitch, dims)
+    per_pair = triangulate_all_pairs(scaled, source=source)
+    flat: list[TriangulatedPoint] = []
+    for pts in per_pair.values():
+        flat.extend(pts)
+    flat.sort(key=lambda p: p.t_rel_s)
+    return flat
+
+
 def _triangulate_non_current_algorithms(
     state: "State",
-    a: PitchPayload | None,
-    b: PitchPayload | None,
+    pitches_by_cam: dict[str, PitchPayload],
     sync_error: str | None,
     result: SessionResult,
 ) -> None:
-    """Phase 7 multi-algorithm result builder.
+    """Phase 7 multi-algorithm result builder, N-cam edition.
 
     The path-loop in `rebuild_result_for_session` triangulates only
     the *current* server_post slot (whatever
@@ -220,84 +289,90 @@ def _triangulate_non_current_algorithms(
     But Phase 7's `stamp_server_post_run` keeps history: running v11
     then v12 leaves *both* algorithms' frames in
     `pitch.frames_by_algorithm`. This helper triangulates each
-    non-current algorithm bucket and writes it directly into
-    `result.triangulated_by_algorithm[<alg_id>]` so the events list,
-    viewer, and any future Phase-8 N-track UI can read v11 trajectories
-    without re-running detection.
+    non-current algorithm bucket across ALL cams and writes the flat
+    multi-pair point list into `result.triangulated_by_algorithm[<alg_id>]`
+    so the events list, viewer, and any future Phase-8 N-track UI can
+    read v11 trajectories without re-running detection.
 
     Skipped buckets:
     - `ios_capture_time` (the live data source) — already surfaced via
       the live aggregator; not a server-side triangulation target.
     - The *current* server_post alg — already handled by the path-loop.
-      Considered "current" if EITHER cam's snapshot names it (union),
-      so a partial-failure mismatch (A=v11, B=v12) skips both v11 and
-      v12 from this helper, leaving the path-loop's mixed pairing as
-      the sole — and visibly logged — source of those frames.
+      Considered "current" if ANY cam's snapshot names it (union across
+      pitches_by_cam), so a partial-failure mismatch among 2+ cams
+      skips all of those algs from this helper, leaving the path-loop's
+      mixed pairing as the sole — and visibly logged — source of those
+      frames.
     """
-    if sync_error is not None or a is None or b is None:
+    if sync_error is not None or len(pitches_by_cam) < 2:
         return
 
-    # Pointer may be None on a session that only ever ran live (no
-    # server_post run). `algorithm_id_for_path` now raises rather than
-    # silently fall back to a legacy bucket (CLAUDE.md), so we resolve
-    # explicitly with a `None`-sentinel that the skip-set logic below
-    # handles cleanly.
-    current_alg_a = (
-        algorithm_id_for_path(a, DetectionPath.server_post)
-        if a.active_server_post_algorithm_id is not None
-        else None
-    )
-    current_alg_b = (
-        algorithm_id_for_path(b, DetectionPath.server_post)
-        if b.active_server_post_algorithm_id is not None
-        else None
-    )
-    if (
-        current_alg_a is not None
-        and current_alg_b is not None
-        and current_alg_a != current_alg_b
-    ):
-        logger.warning(
-            "session %s server_post algorithm mismatch A=%s B=%s — path-loop "
-            "will pair frames across algorithms; rerun /run_server_post on "
-            "both cams to recover",
-            result.session_id, current_alg_a, current_alg_b,
+    # Resolve each cam's current server_post alg pointer. Pointer may be
+    # None on a session that only ever ran live (no server_post run);
+    # `algorithm_id_for_path` raises rather than silently fall back per
+    # CLAUDE.md, so we resolve explicitly with a None-sentinel that the
+    # skip-set logic below handles cleanly.
+    current_alg_by_cam: dict[str, str | None] = {}
+    for cam, pitch in pitches_by_cam.items():
+        if pitch.active_server_post_algorithm_id is not None:
+            current_alg_by_cam[cam] = algorithm_id_for_path(
+                pitch, DetectionPath.server_post,
+            )
+        else:
+            current_alg_by_cam[cam] = None
+    declared = {a for a in current_alg_by_cam.values() if a is not None}
+    if len(declared) > 1:
+        # 2+ cams disagree on which server_post alg is the current one —
+        # path-loop will pair frames across algorithms (mixed); operator
+        # action to recover is to rerun /run_server_post on every cam
+        # with the same preset.
+        per_cam = ", ".join(
+            f"{c}={alg or 'none'}" for c, alg in sorted(current_alg_by_cam.items())
         )
-    current_algs: set[str] = {x for x in (current_alg_a, current_alg_b) if x is not None}
-    candidate_algs: set[str] = (
-        set(a.frames_by_algorithm) | set(b.frames_by_algorithm)
-    )
+        logger.warning(
+            "session %s server_post algorithm mismatch %s — path-loop "
+            "will pair frames across algorithms; rerun /run_server_post "
+            "on every cam to recover",
+            result.session_id, per_cam,
+        )
+    current_algs: set[str] = declared
+    candidate_algs: set[str] = set()
+    for pitch in pitches_by_cam.values():
+        candidate_algs |= set(pitch.frames_by_algorithm)
     for alg_id in sorted(candidate_algs):
         if alg_id == IOS_CAPTURE_TIME or alg_id in current_algs:
             continue
-        frames_a = a.frames_by_algorithm.get(alg_id, [])
-        frames_b = b.frames_by_algorithm.get(alg_id, [])
-        if not frames_a or not frames_b:
+        # Build a per-cam dict containing only cams whose pitch has this
+        # alg's frames — uncalibrated or no-frames cams drop out
+        # naturally, leaving triangulate_all_pairs_for_session to fan out
+        # over the survivors. A single survivor yields an empty list (no
+        # peer to pair against), which we skip by treating as "no
+        # contribution to this bucket".
+        alg_pitches: dict[str, PitchPayload] = {}
+        frame_counts: dict[str, int] = {}
+        for cam, pitch in pitches_by_cam.items():
+            frames = pitch.frames_by_algorithm.get(alg_id, [])
+            if not frames:
+                continue
+            alg_pitches[cam] = pitch_with_algorithm_frames(pitch, alg_id)
+            frame_counts[cam] = len(frames)
+        if len(alg_pitches) < 2:
             continue
         try:
-            pts = triangulate_pair(
-                state,
-                pitch_with_algorithm_frames(a, alg_id),
-                pitch_with_algorithm_frames(b, alg_id),
-                source="server",
+            pts = triangulate_all_pairs_for_session(
+                state, alg_pitches, source="server",
             )
         except Exception as exc:
             result.abort_reasons[f"alg:{alg_id}"] = (
                 f"{type(exc).__name__}: {exc}"
             )
             continue
-        # `triangulate_pair_rays` already emits t_rel-sorted (iterates
-        # `_frame_items` in t_rel order). Explicit sort here makes the
-        # invariant visible so `set_active_server_post_algorithm`'s
-        # fast path can safely re-stamp segments from cached buckets
-        # without re-running triangulation.
-        pts = sorted(pts, key=lambda p: p.t_rel_s)
+        # triangulate_all_pairs_for_session already returns t_rel-sorted
+        # over the flattened multi-pair list — the invariant downstream
+        # consumers (set_active_server_post_algorithm fast path) rely on.
         result.triangulated_by_algorithm[alg_id] = pts
         result.algorithms_completed.add(alg_id)
-        result.frame_counts_by_algorithm[alg_id] = {
-            "A": len(frames_a),
-            "B": len(frames_b),
-        }
+        result.frame_counts_by_algorithm[alg_id] = frame_counts
 
 
 def live_frames_for_camera_locked(
@@ -319,8 +394,11 @@ def session_sync_id_locked(state: "State", session_id: str) -> str | None:
 def validate_pair_sync(
     state: "State", a: PitchPayload, b: PitchPayload
 ) -> str | None:
-    """Return a stable error string when the paired payloads do not belong
-    to the same legacy chirp sync run."""
+    """N=2 sync validator preserved as the pair-level primitive (callers
+    that operate on a chosen pair — e.g. the existing fast-path active-
+    pointer flip — still use it). N-cam callers use
+    `validate_session_sync` below, which iterates this primitive across
+    every pair under the same one-sync-id constraint."""
     if a.sync_anchor_timestamp_s is None or b.sync_anchor_timestamp_s is None:
         return "no time sync"
     with state._lock:
@@ -330,6 +408,34 @@ def validate_pair_sync(
     if a.sync_id != b.sync_id:
         return "sync id mismatch"
     if expected_sync_id is not None and a.sync_id != expected_sync_id:
+        return "sync id mismatch for armed session"
+    return None
+
+
+def validate_session_sync(
+    state: "State", pitches_by_cam: dict[str, PitchPayload],
+) -> str | None:
+    """N-cam sync validator. Every participating cam's pitch must carry
+    the same `sync_id`, the same anchor presence, and (if the armed
+    session has a sync_id stamped) match it. Returns the same stable
+    error strings as `validate_pair_sync` so existing callers /
+    SessionResult.error consumers keep working unchanged. Mono session
+    (1 cam) returns None — single cam has no pair to validate against;
+    rebuild collapses mono to no-triangulation regardless."""
+    if len(pitches_by_cam) < 2:
+        return None
+    if any(p.sync_anchor_timestamp_s is None for p in pitches_by_cam.values()):
+        return "no time sync"
+    if any(p.sync_id is None for p in pitches_by_cam.values()):
+        return "sync id missing"
+    sync_ids = {p.sync_id for p in pitches_by_cam.values()}
+    if len(sync_ids) > 1:
+        return "sync id mismatch"
+    chosen_sync_id = next(iter(sync_ids))
+    first_sid = next(iter(pitches_by_cam.values())).session_id
+    with state._lock:
+        expected_sync_id = session_sync_id_locked(state, first_sid)
+    if expected_sync_id is not None and chosen_sync_id != expected_sync_id:
         return "sync id mismatch for armed session"
     return None
 
@@ -351,25 +457,35 @@ def empty_result_for_session(
 
 
 def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult:
+    # Resolve expected cams BEFORE taking the lock — `expected_camera_ids()`
+    # acquires the non-reentrant `_lock` internally, so calling it inside
+    # the lock block below self-deadlocks.
+    expected_cams = state.expected_camera_ids()
     with state._lock:
-        a = state.pitches.get(("A", session_id))
-        b = state.pitches.get(("B", session_id))
+        pitches_by_cam = pitches_by_cam_for_session(state, session_id, expected_cams)
         live = state._live_pairings.get(session_id)
         session_obj = state._lookup_session_locked(session_id)
         pairing_tuning = state._pairing_tuning
 
+    # Representative (a, b) for helpers that still operate on a chosen
+    # pair — config aggregation, active-server-post pointer resolution.
+    # The triangulation path uses the full pitches_by_cam dict instead.
+    a, b = _representative_pair(pitches_by_cam)
+
     result = empty_result_for_session(
         state,
         session_id,
-        cameras_received={"A": a is not None, "B": b is not None},
+        cameras_received={
+            cam: cam in pitches_by_cam for cam in expected_cams
+        },
     )
     result.gap_threshold_m = pairing_tuning.gap_threshold_m
-    # Aggregate the two cams' last-run timestamps — the more recent one
+    # Aggregate every cam's last-run timestamps — the most recent one
     # wins so a partial rerun (only one cam's MOV reprocessed) still
     # advances the session's "last server_post" age.
     server_post_ts = [
-        p.server_post_ran_at for p in (a, b)
-        if p is not None and p.server_post_ran_at is not None
+        p.server_post_ran_at for p in pitches_by_cam.values()
+        if p.server_post_ran_at is not None
     ]
     if server_post_ts:
         result.server_post_ran_at = max(server_post_ts)
@@ -377,19 +493,18 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
     candidate_paths: set[DetectionPath] = set()
     if session_obj is not None:
         candidate_paths |= set(session_obj.paths)
-    for pitch in (a, b):
-        if pitch is not None:
-            candidate_paths |= paths_for_pitch(state, pitch)
-            # Auto-include server_post when the bucket is populated so
-            # reprocessing can flow through even without an explicit paths
-            # snapshot on the pitch JSON.
-            if pitch.frames_server_post:
-                candidate_paths.add(DetectionPath.server_post)
-            # Same for live: persisted `frames_live` (from an old WS
-            # streaming run, or `persist_live_frames`) is enough to drive
-            # the live triangulation path on rebuild even after restart.
-            if pitch.frames_live:
-                candidate_paths.add(DetectionPath.live)
+    for pitch in pitches_by_cam.values():
+        candidate_paths |= paths_for_pitch(state, pitch)
+        # Auto-include server_post when the bucket is populated so
+        # reprocessing can flow through even without an explicit paths
+        # snapshot on the pitch JSON.
+        if pitch.frames_server_post:
+            candidate_paths.add(DetectionPath.server_post)
+        # Same for live: persisted `frames_live` (from an old WS
+        # streaming run, or `persist_live_frames`) is enough to drive
+        # the live triangulation path on rebuild even after restart.
+        if pitch.frames_live:
+            candidate_paths.add(DetectionPath.live)
     live_frame_counts = live.frame_counts_snapshot() if live is not None else {}
     if any(c for c in live_frame_counts.values()):
         candidate_paths.add(DetectionPath.live)
@@ -420,50 +535,51 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
                 {f"live:{cam}": why for cam, why in abort_reasons_copy.items()}
             )
 
-    sync_error = None
-    if a is not None and b is not None:
-        sync_error = validate_pair_sync(state, a, b)
-        if sync_error is not None:
-            result.error = sync_error
+    sync_error = validate_session_sync(state, pitches_by_cam)
+    if sync_error is not None:
+        result.error = sync_error
 
-    mono_session = (a is None) != (b is None)
+    mono_session = len(pitches_by_cam) < 2
     for path in sorted(candidate_paths, key=lambda p: p.value):
         # When the streaming live aggregator already populated this path
         # above, skip — it's authoritative. Otherwise (rebuild for a session
         # restored from disk after server restart, or an offline replay),
-        # fall through to the same triangulate_pair flow used by other paths
+        # fall through to the same triangulation flow used by other paths
         # so persisted `frames_live` can still drive the live trajectory.
         if path == DetectionPath.live and live is not None:
             continue
-        frames_a = get_path_frames(a, path) if a is not None else []
-        frames_b = get_path_frames(b, path) if b is not None else []
-        frame_counts: dict[str, int] = {}
-        if a is not None and frames_a:
-            frame_counts["A"] = len(frames_a)
-        if b is not None and frames_b:
-            frame_counts["B"] = len(frames_b)
+        frames_by_cam: dict[str, list[FramePayload]] = {
+            cam: get_path_frames(pitch, path)
+            for cam, pitch in pitches_by_cam.items()
+        }
+        frame_counts: dict[str, int] = {
+            cam: len(frames) for cam, frames in frames_by_cam.items() if frames
+        }
         path_alg = (
             IOS_CAPTURE_TIME if path == DetectionPath.live
             else result.active_server_post_algorithm_id
         )
         if path_alg is None:
             # server_post path with no resolvable algorithm — this only
-            # fires when both A and B lack an active pointer, which
-            # contradicts having frames in `frames_server_post`. Skip
-            # rather than mis-file under a guessed bucket.
+            # fires when no cam has an active pointer, which contradicts
+            # having frames in `frames_server_post`. Skip rather than
+            # mis-file under a guessed bucket.
             continue
         if frame_counts:
             result.frame_counts_by_algorithm[path_alg] = frame_counts
 
-        if sync_error is None and a is not None and b is not None:
-            if not frames_a or not frames_b:
-                continue
+        if sync_error is None and len(frame_counts) >= 2:
+            # Cams with no frames on this path drop out of the per-path
+            # pitches_by_cam; only the ones with real frames contribute
+            # to fan-out. If fewer than 2 cams have frames, no pair to
+            # triangulate — fall through to algorithms_completed below.
+            path_pitches: dict[str, PitchPayload] = {
+                cam: pitch_with_path_frames(pitches_by_cam[cam], path)
+                for cam in frame_counts
+            }
             try:
-                pts = triangulate_pair(
-                    state,
-                    pitch_with_path_frames(a, path),
-                    pitch_with_path_frames(b, path),
-                    source="server",
+                pts = triangulate_all_pairs_for_session(
+                    state, path_pitches, source="server",
                 )
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
@@ -477,15 +593,15 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             result.algorithms_completed.add(path_alg)
 
     # Phase 7 multi-algorithm: triangulate every algorithm bucket
-    # present in `pitch.frames_by_algorithm` so a v11 → v12 rerun
-    # leaves both algorithms' trajectories surfaced on the result.
+    # present in any cam's `pitch.frames_by_algorithm` so a v11 → v12
+    # rerun leaves both algorithms' trajectories surfaced on the result.
     # The path-loop above already covers the *current* server_post
     # alg via the after-validator mirror; this loop handles the
-    # non-current ones (the "history" the dict accumulates). live
+    # non-current ones (the "history" the dict accumulates). Live
     # path is excluded — `ios_capture_time` is already surfaced via
     # the live aggregator at the top of this function.
     _triangulate_non_current_algorithms(
-        state, a, b, sync_error, result,
+        state, pitches_by_cam, sync_error, result,
     )
 
     authority: list[TriangulatedPoint] = []
@@ -499,10 +615,10 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             break
     result.triangulated = authority
 
-    if not result.triangulated and result.error is None and (a is not None or b is not None):
+    if not result.triangulated and result.error is None and pitches_by_cam:
         if result.abort_reasons:
             result.aborted = True
-        elif a is not None and b is not None:
+        elif len(pitches_by_cam) >= 2:
             result.error = "no detection completed"
     _stamp_frozen_config_on_result(result, a, b)
     stamp_segments_on_result(result, legacy_points_path=legacy_points_path)
@@ -714,39 +830,39 @@ def recompute_result_for_session(
     Caller is the `POST /sessions/{sid}/recompute` route. No MOV decode,
     no HSV — candidates are read from the persisted `frames_live` /
     `frames_server_post` directly. Sub-second on a typical session."""
+    # Resolve expected cams before the lock (see rebuild_result_for_session).
+    expected_cams = state.expected_camera_ids()
     with state._lock:
-        a = state.pitches.get(("A", session_id))
-        b = state.pitches.get(("B", session_id))
+        pitches_by_cam = pitches_by_cam_for_session(state, session_id, expected_cams)
+    a, b = _representative_pair(pitches_by_cam)
 
     result = empty_result_for_session(
         state,
         session_id,
-        cameras_received={"A": a is not None, "B": b is not None},
+        cameras_received={
+            cam: cam in pitches_by_cam for cam in expected_cams
+        },
     )
     result.gap_threshold_m = float(gap_threshold_m)
 
     server_post_ts = [
-        p.server_post_ran_at for p in (a, b)
-        if p is not None and p.server_post_ran_at is not None
+        p.server_post_ran_at for p in pitches_by_cam.values()
+        if p.server_post_ran_at is not None
     ]
     if server_post_ts:
         result.server_post_ran_at = max(server_post_ts)
 
     candidate_paths: set[DetectionPath] = set()
-    for pitch in (a, b):
-        if pitch is None:
-            continue
+    for pitch in pitches_by_cam.values():
         if pitch.frames_server_post:
             candidate_paths.add(DetectionPath.server_post)
         if pitch.frames_live:
             candidate_paths.add(DetectionPath.live)
     legacy_points_path = _legacy_points_path(candidate_paths)
 
-    sync_error = None
-    if a is not None and b is not None:
-        sync_error = validate_pair_sync(state, a, b)
-        if sync_error is not None:
-            result.error = sync_error
+    sync_error = validate_session_sync(state, pitches_by_cam)
+    if sync_error is not None:
+        result.error = sync_error
 
     # Stamp the active server_post pointer up front so the path-loop
     # below can resolve `server_post → algorithm_id` deterministically.
@@ -754,11 +870,16 @@ def recompute_result_for_session(
     if srv_alg is not None:
         result.active_server_post_algorithm_id = srv_alg
 
-    if a is not None and b is not None and sync_error is None:
+    if sync_error is None and len(pitches_by_cam) >= 2:
         for path in sorted(candidate_paths, key=lambda p: p.value):
-            frames_a = get_path_frames(a, path)
-            frames_b = get_path_frames(b, path)
-            if not frames_a or not frames_b:
+            frames_by_cam = {
+                cam: get_path_frames(pitch, path)
+                for cam, pitch in pitches_by_cam.items()
+            }
+            frame_counts = {
+                cam: len(frames) for cam, frames in frames_by_cam.items() if frames
+            }
+            if len(frame_counts) < 2:
                 continue
             path_alg = (
                 IOS_CAPTURE_TIME if path == DetectionPath.live
@@ -766,16 +887,14 @@ def recompute_result_for_session(
             )
             if path_alg is None:
                 continue
-            result.frame_counts_by_algorithm[path_alg] = {
-                "A": len(frames_a),
-                "B": len(frames_b),
+            result.frame_counts_by_algorithm[path_alg] = frame_counts
+            path_pitches = {
+                cam: pitch_with_path_frames(pitches_by_cam[cam], path)
+                for cam in frame_counts
             }
             try:
-                pts = triangulate_pair(
-                    state,
-                    pitch_with_path_frames(a, path),
-                    pitch_with_path_frames(b, path),
-                    source="server",
+                pts = triangulate_all_pairs_for_session(
+                    state, path_pitches, source="server",
                 )
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
@@ -788,7 +907,7 @@ def recompute_result_for_session(
     # does — without this, recomputing with a v12 active pointer
     # would drop v11 trajectories from the result.
     _triangulate_non_current_algorithms(
-        state, a, b, sync_error, result,
+        state, pitches_by_cam, sync_error, result,
     )
 
     authority: list[TriangulatedPoint] = []

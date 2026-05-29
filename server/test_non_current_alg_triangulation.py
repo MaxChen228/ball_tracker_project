@@ -79,20 +79,29 @@ def _empty_result() -> SessionResult:
 
 
 class _FakeTriangulatePair:
-    """Records every call so tests can assert alg routing."""
+    """Records every call so tests can assert alg routing. As of Phase 4-2
+    the monkeypatch target is `triangulate_all_pairs_for_session` (N-cam
+    entry point) instead of the old single-pair `triangulate_pair`.
+    Signature: (state, pitches_by_cam: dict[str, PitchPayload], *, source)."""
 
     def __init__(self, *, raise_for: set[str] | None = None):
         self.calls: list[dict] = []
         self.raise_for = raise_for or set()
 
-    def __call__(self, state, a, b, *, source="server"):
+    def __call__(self, state, pitches_by_cam, *, source="server"):
         # Detect which alg this clone is carrying — pitch_with_algorithm_frames
         # projects the alg's frames into frames_server_post, so frame[0].frame_index
-        # encodes which bucket was selected by the helper.
-        alg_marker = a.frames_server_post[0].frame_index if a.frames_server_post else -1
+        # encodes which bucket was selected by the helper. Read from any
+        # representative cam (they all carry the same alg's frames at this point).
+        any_pitch = next(iter(pitches_by_cam.values()))
+        alg_marker = (
+            any_pitch.frames_server_post[0].frame_index
+            if any_pitch.frames_server_post else -1
+        )
         self.calls.append({
             "alg_marker": alg_marker,
             "source": source,
+            "cams": sorted(pitches_by_cam.keys()),
         })
         if alg_marker in self.raise_for:
             raise RuntimeError(f"forced failure for marker={alg_marker}")
@@ -109,7 +118,7 @@ class _FakeTriangulatePair:
 
 def test_helper_accumulates_non_current_algorithms(monkeypatch):
     fake = _FakeTriangulatePair()
-    monkeypatch.setattr(session_results, "triangulate_pair", fake)
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", fake)
 
     snap_v11 = _snapshot("v11_hsv_cc")
     a = _pitch(camera_id="A", server_post_config_used=snap_v11)
@@ -126,7 +135,7 @@ def test_helper_accumulates_non_current_algorithms(monkeypatch):
     result = _empty_result()
 
     session_results._triangulate_non_current_algorithms(
-        state=None, a=a, b=b, sync_error=None, result=result,
+        state=None, pitches_by_cam={"A": a, "B": b}, sync_error=None, result=result,
     )
 
     # v11 (current) skipped; v12 triangulated:
@@ -141,7 +150,7 @@ def test_helper_writes_abort_reason_on_exception(monkeypatch):
     """No silent fallback: if triangulate_pair raises, the failure
     must surface via result.abort_reasons[f'alg:{id}']."""
     fake = _FakeTriangulatePair(raise_for={12})
-    monkeypatch.setattr(session_results, "triangulate_pair", fake)
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", fake)
 
     snap_v11 = _snapshot("v11_hsv_cc")
     a = _pitch(camera_id="A", server_post_config_used=snap_v11)
@@ -151,7 +160,7 @@ def test_helper_writes_abort_reason_on_exception(monkeypatch):
     result = _empty_result()
 
     session_results._triangulate_non_current_algorithms(
-        state=None, a=a, b=b, sync_error=None, result=result,
+        state=None, pitches_by_cam={"A": a, "B": b}, sync_error=None, result=result,
     )
 
     assert "alg:v12_bad" in result.abort_reasons
@@ -167,7 +176,7 @@ def test_helper_calls_triangulate_pair_for_each_non_current_alg(monkeypatch):
     SessionResult — so the helper signature is now plain
     `(state, a, b, sync_error, result)`."""
     fake = _FakeTriangulatePair()
-    monkeypatch.setattr(session_results, "triangulate_pair", fake)
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", fake)
 
     snap_v11 = _snapshot("v11_hsv_cc")
     a = _pitch(camera_id="A", server_post_config_used=snap_v11)
@@ -176,7 +185,7 @@ def test_helper_calls_triangulate_pair_for_each_non_current_alg(monkeypatch):
     b.frames_by_algorithm = {"v11_hsv_cc": [_frame(11)], "v12_x": [_frame(12)]}
 
     session_results._triangulate_non_current_algorithms(
-        state=None, a=a, b=b, sync_error=None,
+        state=None, pitches_by_cam={"A": a, "B": b}, sync_error=None,
         result=_empty_result(),
     )
 
@@ -195,7 +204,7 @@ def test_helper_logs_cross_cam_algorithm_mismatch(monkeypatch, caplog):
     monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_other", fake_entry)
 
     fake = _FakeTriangulatePair()
-    monkeypatch.setattr(session_results, "triangulate_pair", fake)
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", fake)
 
     a = _pitch(camera_id="A", server_post_config_used=_snapshot("v11_hsv_cc"))
     b = _pitch(camera_id="B", server_post_config_used=_snapshot("v12_other"))
@@ -207,7 +216,7 @@ def test_helper_logs_cross_cam_algorithm_mismatch(monkeypatch, caplog):
 
     with caplog.at_level(logging.WARNING, logger="session_results"):
         session_results._triangulate_non_current_algorithms(
-            state=None, a=a, b=b, sync_error=None, result=result,
+            state=None, pitches_by_cam={"A": a, "B": b}, sync_error=None, result=result,
         )
 
     assert any("algorithm mismatch" in rec.message for rec in caplog.records)
@@ -230,8 +239,9 @@ def test_recompute_preserves_non_current_alg_history(tmp_path, monkeypatch):
     )
     monkeypatch.setitem(algorithms_mod._REGISTRY, "v12_test", fake)
 
-    # Stub triangulate_pair so the test doesn't need calibration / MOVs.
-    monkeypatch.setattr(session_results, "triangulate_pair", _FakeTriangulatePair())
+    # Stub triangulate_all_pairs_for_session so the test doesn't need
+    # calibration / MOVs (Phase 4-2: that's the N-cam entry point now).
+    monkeypatch.setattr(session_results, "triangulate_all_pairs_for_session", _FakeTriangulatePair())
 
     s = main.State(data_dir=tmp_path)
     s.heartbeat("A", time_synced=True, time_sync_id="sy_deadbeef",
