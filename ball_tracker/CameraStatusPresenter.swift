@@ -92,6 +92,14 @@ final class CameraStatusPresenter {
                 chipText: "互相同步中",
                 chipStyle: .pending
             )
+        case .quickSyncing:
+            return .init(
+                borderColor: DesignTokens.Colors.accent,
+                borderWidth: 8,
+                pulse: true,
+                chipText: "快速同步中",
+                chipStyle: .pending
+            )
         case .recording:
             return .init(
                 borderColor: DesignTokens.Colors.destructive,

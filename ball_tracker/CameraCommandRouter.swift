@@ -14,6 +14,12 @@ final class CameraCommandRouter {
         let refreshModeLabel: () -> Void
         let startTimeSync: (String) -> Void
         let applyMutualSync: (String, [Double], Double) -> Void
+        /// Quick sync (single-emitter, N-listener) record+upload trigger.
+        /// `(syncId, isEmitter, emitAtS, recordDurationS)`.
+        let applyQuickSync: (String, Bool, [Double], Double) -> Void
+        /// Adopt the server-solved quick-sync anchor pushed via
+        /// `quick_sync_applied`. `(syncId, anchorTimestampS)`.
+        let adoptQuickSyncAnchor: (String, Double) -> Void
         let applyRemoteArm: () -> Void
         let applyRemoteDisarm: () -> Void
         let updateTimeSyncServerState: (Bool, String?) -> Void
@@ -108,6 +114,61 @@ final class CameraCommandRouter {
             }
             DispatchQueue.main.async {
                 self.deps.applyMutualSync(sid, emitAtS, recordDurationS)
+            }
+        case "sync_quick_run":
+            // Same calibration-capture gate as sync_run: quick sync opens an
+            // audio chirp window; chirp detection is dead while the AV
+            // session is stopped for a 12 MP swap.
+            guard calIdle else {
+                commandLog.warning("ws sync_quick_run dropped: calibration capture in flight (state=\(String(describing: self.deps.getCalCaptureState()), privacy: .public))")
+                return
+            }
+            guard let sid = message["sync_id"] as? String else {
+                commandLog.error("ws sync_quick_run missing required field sync_id")
+                return
+            }
+            var missing: [String] = []
+            let isEmitter = message["is_emitter"] as? Bool
+            let emitAtS = message["emit_at_s"] as? [Double]
+            let recordDurationS = message["record_duration_s"] as? Double
+            if isEmitter == nil { missing.append("is_emitter") }
+            if emitAtS == nil { missing.append("emit_at_s") }
+            if recordDurationS == nil { missing.append("record_duration_s") }
+            guard let isEmitter, let emitAtS, let recordDurationS, missing.isEmpty else {
+                commandLog.error("ws sync_quick_run sid=\(sid, privacy: .public) missing required fields: \(missing.joined(separator: ","), privacy: .public)")
+                return
+            }
+            // Atomic-drop on out-of-contract values (same as sync_run). The
+            // server pushes emit_at_s = emit_a_at_s (non-empty) to every cam
+            // regardless of role, so an empty array is a server bug — fail
+            // loud rather than silently running with no emission schedule.
+            guard !emitAtS.isEmpty else {
+                commandLog.error("ws sync_quick_run sid=\(sid, privacy: .public) atomic-drop: emit_at_s is empty (server bug)")
+                return
+            }
+            guard recordDurationS >= 1.0 else {
+                commandLog.error("ws sync_quick_run sid=\(sid, privacy: .public) atomic-drop: record_duration_s=\(recordDurationS) below 1.0 floor")
+                return
+            }
+            DispatchQueue.main.async {
+                self.deps.applyQuickSync(sid, isEmitter, emitAtS, recordDurationS)
+            }
+        case "quick_sync_applied":
+            // Server solved the quick sync and is pushing this cam its own
+            // anchor (chirp-arrival PTS on this cam's clock) so iOS adopts
+            // it as lastSyncAnchor. No calIdle / state gate: it's a passive
+            // record-keeping update the device should accept regardless of
+            // state. Required fields fail loud, same atomic-drop pattern.
+            guard let sid = message["sync_id"] as? String else {
+                commandLog.error("ws quick_sync_applied missing required field sync_id")
+                return
+            }
+            guard let anchorTs = message["sync_anchor_timestamp_s"] as? Double else {
+                commandLog.error("ws quick_sync_applied sid=\(sid, privacy: .public) missing required field sync_anchor_timestamp_s")
+                return
+            }
+            DispatchQueue.main.async {
+                self.deps.adoptQuickSyncAnchor(sid, anchorTs)
             }
         case "sync_command":
             // server lockstep: every sync_command WS push carries

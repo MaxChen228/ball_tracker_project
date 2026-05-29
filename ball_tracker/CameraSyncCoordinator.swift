@@ -25,6 +25,10 @@ final class CameraSyncCoordinator {
         let flashErrorBanner: (String, TimeInterval) -> Void
         let refreshUI: () -> Void
         let makeMutualSyncAudio: ([Double], Double) -> MutualSyncAudio
+        /// Quick-sync (single-emitter, N-listener) audio engine factory.
+        /// `(emitAtS, recordDurationS, isEmitter)` — a listener passes
+        /// `isEmitter: false` and never plays; the band is always A.
+        let makeQuickSyncAudio: ([Double], Double, Bool) -> QuickSyncAudio
     }
 
     private let deps: Dependencies
@@ -41,6 +45,17 @@ final class CameraSyncCoordinator {
     private var pendingSyncEmitAtS: [Double]?
     private var pendingSyncRecordDurationS: Double?
     private var syncWatchdog: DispatchWorkItem?
+
+    // Quick-sync (single-emitter, N-listener) recording state. Mirrors the
+    // mutual fields above but is a fully separate flow: any cam can emit
+    // (band fixed A), the anchor comes back via the `quick_sync_applied`
+    // push (adoptQuickSyncAnchor) rather than local detection.
+    private var quickSyncAudio: QuickSyncAudio?
+    private var pendingQuickSyncId: String?
+    private var pendingQuickEmitAtS: [Double]?
+    private var pendingQuickRecordDurationS: Double?
+    private var pendingQuickIsEmitter: Bool?
+    private var quickSyncWatchdog: DispatchWorkItem?
 
     init(dependencies: Dependencies) {
         self.deps = dependencies
@@ -121,6 +136,166 @@ final class CameraSyncCoordinator {
         syncWatchdog?.cancel()
         syncWatchdog = nil
         teardownMutualSync(status: "Mutual sync · \(reason)")
+    }
+
+    // MARK: - Quick sync (single-emitter, N-listener)
+
+    /// Adopt the server-solved quick-sync anchor pushed back via
+    /// `quick_sync_applied`. The anchor is cross-correlated server-side
+    /// (this device never locally detected the chirp), so we set
+    /// `lastSyncAnchor` + the heartbeat sync id exactly like `completeTimeSync`
+    /// does for the local-detection path — the next heartbeat then reports
+    /// this value as `sync_anchor_timestamp_s` / `time_sync_id`, which is
+    /// what keeps the server registry from wiping the anchor (the heartbeat
+    /// is the registry's source of truth). No state gate: this is a passive
+    /// adoption the device should record regardless of current state (unlike
+    /// the local-detection completeTimeSync which only fires in
+    /// `.timeSyncWaiting`).
+    func adoptQuickSyncAnchor(syncId: String, anchorTimestampS: Double) {
+        syncLog.info("camera adopt quick-sync anchor anchor_ts=\(anchorTimestampS) sync_id=\(syncId, privacy: .public) cam=\(self.deps.getCameraRole(), privacy: .public)")
+        lastSyncAnchor = RecoveredAnchor(syncId: syncId, anchorTimestampS: anchorTimestampS)
+        deps.healthMonitor()?.updateTimeSyncId(syncId)
+    }
+
+    func applyQuickSync(syncId: String, isEmitter: Bool, emitAtS: [Double], recordDurationS: Double) {
+        guard deps.getState() == .standby else {
+            syncLog.warning("sync_quick_run ignored state=\(CameraViewController.stateText(self.deps.getState()), privacy: .public) sync_id=\(syncId, privacy: .public)")
+            deps.uploader().postSyncLog(event: "ignored", detail: [
+                "reason": .string("not_standby"),
+                "state": .string(CameraViewController.stateText(deps.getState())),
+                "sync_id": .string(syncId),
+                "flow": .string("quick"),
+            ])
+            return
+        }
+        syncLog.info("camera entering quick-sync sync_id=\(syncId, privacy: .public) cam=\(self.deps.getCameraRole(), privacy: .public) is_emitter=\(isEmitter, privacy: .public) record_s=\(recordDurationS, privacy: .public)")
+        deps.uploader().postSyncLog(event: "enter", detail: [
+            "sync_id": .string(syncId),
+            "role": .string(deps.getCameraRole()),
+            "is_emitter": .bool(isEmitter),
+            "flow": .string("quick"),
+        ])
+        pendingQuickSyncId = syncId
+        // Out-of-contract values are atomic-dropped at the route layer; assert
+        // the invariant here, no silent clamp (same rationale as mutual).
+        assert(recordDurationS >= 1.0, "sync_quick_run: record_duration_s=\(recordDurationS) below 1.0 floor leaked past route guard")
+        assert(!isEmitter || !emitAtS.isEmpty, "sync_quick_run: emitter with empty emit_at_s leaked past route guard")
+        pendingQuickEmitAtS = emitAtS
+        pendingQuickRecordDurationS = recordDurationS
+        pendingQuickIsEmitter = isEmitter
+        startQuickSync()
+    }
+
+    func abortQuickSync(reason: String) {
+        syncLog.warning("quick-sync aborted reason=\(reason, privacy: .public) sync_id=\(self.pendingQuickSyncId ?? "nil", privacy: .public)")
+        var detail: [String: ServerUploader.AnyJSONValue] = [
+            "reason": .string(reason), "flow": .string("quick"),
+        ]
+        if let syncId = pendingQuickSyncId {
+            detail["sync_id"] = .string(syncId)
+        }
+        deps.uploader().postSyncLog(event: "abort", detail: detail)
+        quickSyncWatchdog?.cancel()
+        quickSyncWatchdog = nil
+        teardownQuickSync(status: "Quick sync · \(reason)")
+    }
+
+    private func startQuickSync() {
+        let role = deps.getCameraRole()
+        // No A/B-only role guard (unlike mutual): the emitter always plays
+        // band A and any cam can be the emitter — that is the N-cam enabler.
+        // Same anchor-clearing rationale as startMutualSync: a run that fails
+        // to recover an anchor must not leave us claiming the previous one.
+        lastSyncAnchor = nil
+        deps.healthMonitor()?.updateTimeSyncId(nil)
+
+        guard let emitAtS = pendingQuickEmitAtS,
+              let recordDurationS = pendingQuickRecordDurationS,
+              let isEmitter = pendingQuickIsEmitter else {
+            preconditionFailure("startQuickSync called without pendingQuick fields — applyQuickSync must write all three before transitioning to quickSyncing")
+        }
+
+        let audio = deps.makeQuickSyncAudio(emitAtS, recordDurationS, isEmitter)
+        quickSyncAudio = audio
+        deps.uploader().postSyncLog(event: "recording_started", detail: [
+            "role": .string(role), "flow": .string("quick"),
+            "is_emitter": .bool(isEmitter),
+        ])
+
+        deps.transitionState(.quickSyncing)
+        deps.setStatusText("Quick sync · recording")
+        deps.refreshUI()
+
+        audio.beginSync(
+            onRecordingComplete: { [weak self] result in
+                self?.handleQuickSyncRecording(result: result)
+            },
+            onError: { [weak self] message in
+                self?.abortQuickSync(reason: "audio_init_failed: \(message)")
+            }
+        )
+
+        let timeoutS = recordDurationS + 3.0
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.deps.getState() == .quickSyncing else { return }
+            self.abortQuickSync(reason: "timeout")
+        }
+        quickSyncWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeoutS, execute: work)
+    }
+
+    private func handleQuickSyncRecording(result: QuickSyncAudio.RecordingResult) {
+        guard deps.getState() == .quickSyncing else { return }
+        guard let syncId = pendingQuickSyncId else {
+            syncLog.error("quick recording complete without pending sync_id — ignoring")
+            teardownQuickSync(status: "Quick sync · orphan")
+            return
+        }
+        quickSyncWatchdog?.cancel()
+        quickSyncWatchdog = nil
+
+        deps.uploader().postSyncLog(event: "recording_complete", detail: [
+            "sync_id": .string(syncId),
+            "flow": .string("quick"),
+            "wav_bytes": .int(result.wavData.count),
+            "audio_start_pts_s": .double(result.audioStartPtsS),
+        ])
+
+        deps.setStatusText("Quick sync · uploading")
+        deps.refreshUI()
+
+        let meta = ServerUploader.QuickSyncUploadMeta(
+            sync_id: syncId,
+            camera_id: deps.getCameraRole(),
+            audio_start_pts_s: result.audioStartPtsS
+        )
+        syncLog.info("quick-sync uploading wav_bytes=\(result.wavData.count)")
+        deps.uploader().uploadQuickSyncAudio(meta: meta, wavData: result.wavData) { [weak self] upResult in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch upResult {
+                case .success:
+                    self.deps.setStatusText("Quick sync · done")
+                case .failure(let error):
+                    syncLog.error("quick-sync audio upload failed: \(error.localizedDescription, privacy: .public)")
+                    self.deps.setStatusText("Quick sync · upload failed")
+                }
+                self.deps.refreshUI()
+            }
+        }
+
+        teardownQuickSync(status: "Quick sync · uploaded")
+    }
+
+    private func teardownQuickSync(status: String) {
+        quickSyncAudio?.endSync()
+        quickSyncAudio = nil
+        pendingQuickSyncId = nil
+        deps.transitionState(.standby)
+        deps.reconcileStandbyCaptureState()
+        deps.hideBanner()
+        deps.setStatusText(status)
+        deps.refreshUI()
     }
 
     private func beginTimeSync(syncId: String) {

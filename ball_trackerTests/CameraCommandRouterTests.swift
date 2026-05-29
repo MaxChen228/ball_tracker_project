@@ -30,6 +30,8 @@ final class CameraCommandRouterTests: XCTestCase {
         private(set) var refreshModeLabelCount = 0
         private(set) var startTimeSyncCalls: [String] = []
         private(set) var applyMutualSyncCalls: [(String, [Double], Double)] = []
+        private(set) var applyQuickSyncCalls: [(String, Bool, [Double], Double)] = []
+        private(set) var adoptQuickSyncAnchorCalls: [(String, Double)] = []
         private(set) var applyRemoteArmCount = 0
         private(set) var applyRemoteDisarmCount = 0
         private(set) var updateTimeSyncServerCalls: [(Bool, String?)] = []
@@ -76,6 +78,12 @@ final class CameraCommandRouterTests: XCTestCase {
                 },
                 applyMutualSync: { id, emits, dur in
                     self.guarded { self.applyMutualSyncCalls.append((id, emits, dur)) }
+                },
+                applyQuickSync: { id, isEmitter, emits, dur in
+                    self.guarded { self.applyQuickSyncCalls.append((id, isEmitter, emits, dur)) }
+                },
+                adoptQuickSyncAnchor: { id, anchorTs in
+                    self.guarded { self.adoptQuickSyncAnchorCalls.append((id, anchorTs)) }
                 },
                 applyRemoteArm: {
                     self.guarded { self.applyRemoteArmCount += 1 }
@@ -459,6 +467,95 @@ final class CameraCommandRouterTests: XCTestCase {
         drainMain()
         XCTAssertTrue(fixture.applyMutualSyncCalls.isEmpty,
                       "sync_run must atomic-drop when record_duration_s < 1.0 (D-4)")
+    }
+
+    // MARK: sync_quick_run — single-emitter, N-listener record+upload
+
+    func testQuickSyncRunAppliesWithRequiredFields() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "sync_quick_run",
+            "sync_id": "quick_y",
+            "is_emitter": true,
+            "emit_at_s": [0.5],
+            "record_duration_s": 3.0
+        ])
+        drainMain()
+        XCTAssertEqual(fixture.applyQuickSyncCalls.count, 1)
+        let call = fixture.applyQuickSyncCalls.first
+        XCTAssertEqual(call?.0, "quick_y")
+        XCTAssertEqual(call?.1, true)
+        XCTAssertEqual(call?.2, [0.5])
+        XCTAssertEqual(call?.3, 3.0)
+    }
+
+    func testQuickSyncRunDropsWhenRequiredFieldsMissing() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "sync_quick_run",
+            "sync_id": "quick_x"
+            // is_emitter + emit_at_s + record_duration_s missing on purpose
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.applyQuickSyncCalls.isEmpty,
+                      "sync_quick_run must atomic-drop when required fields are absent")
+    }
+
+    func testQuickSyncRunDropsWhenEmitAtSEmpty() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "sync_quick_run",
+            "sync_id": "quick_empty",
+            "is_emitter": false,
+            "emit_at_s": [Double](),
+            "record_duration_s": 3.0
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.applyQuickSyncCalls.isEmpty,
+                      "sync_quick_run must atomic-drop when emit_at_s is empty (server bug)")
+    }
+
+    func testQuickSyncRunDroppedDuringCalibrationCapture() {
+        let fixture = Fixture()
+        fixture.calCaptureState = .swappingTo
+        let (router, _, _) = makeRouter(fixture)
+        router.handle(message: [
+            "type": "sync_quick_run",
+            "sync_id": "quick_cal",
+            "is_emitter": true,
+            "emit_at_s": [0.5],
+            "record_duration_s": 3.0
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.applyQuickSyncCalls.isEmpty,
+                      "sync_quick_run must drop while a calibration capture is in flight")
+    }
+
+    // MARK: quick_sync_applied — adopt server-solved anchor
+
+    func testQuickSyncAppliedAdoptsAnchor() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "quick_sync_applied",
+            "sync_id": "quick_y",
+            "sync_anchor_timestamp_s": 123.456
+        ])
+        drainMain()
+        XCTAssertEqual(fixture.adoptQuickSyncAnchorCalls.count, 1)
+        XCTAssertEqual(fixture.adoptQuickSyncAnchorCalls.first?.0, "quick_y")
+        XCTAssertEqual(fixture.adoptQuickSyncAnchorCalls.first?.1, 123.456)
+    }
+
+    func testQuickSyncAppliedDropsWhenAnchorMissing() {
+        let (router, fixture, _) = makeRouter()
+        router.handle(message: [
+            "type": "quick_sync_applied",
+            "sync_id": "quick_y"
+            // sync_anchor_timestamp_s missing
+        ])
+        drainMain()
+        XCTAssertTrue(fixture.adoptQuickSyncAnchorCalls.isEmpty,
+                      "quick_sync_applied must atomic-drop when anchor is absent")
     }
 
     // MARK: paths parser — empty / garbage tolerant

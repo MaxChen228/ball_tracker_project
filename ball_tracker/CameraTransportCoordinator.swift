@@ -62,6 +62,8 @@ final class CameraTransportCoordinator: NSObject {
         let getChirpSnapshot: () -> AudioChirpDetector.Snapshot?
         let startTimeSync: (String) -> Void
         let applyMutualSync: (String, [Double], Double) -> Void
+        let applyQuickSync: (String, Bool, [Double], Double) -> Void
+        let adoptQuickSyncAnchor: (String, Double) -> Void
         let applyRemoteArm: () -> Void
         let applyRemoteDisarm: () -> Void
         let updateTimeSyncServerState: (Bool, String?) -> Void
@@ -364,6 +366,8 @@ final class CameraTransportCoordinator: NSObject {
                 refreshModeLabel: { [weak self] in self?.dependencies.refreshModeLabel() },
                 startTimeSync: { [weak self] syncId in self?.dependencies.startTimeSync(syncId) },
                 applyMutualSync: { [weak self] syncId, emitAtS, recordDurationS in self?.dependencies.applyMutualSync(syncId, emitAtS, recordDurationS) },
+                applyQuickSync: { [weak self] syncId, isEmitter, emitAtS, recordDurationS in self?.dependencies.applyQuickSync(syncId, isEmitter, emitAtS, recordDurationS) },
+                adoptQuickSyncAnchor: { [weak self] syncId, anchorTs in self?.dependencies.adoptQuickSyncAnchor(syncId, anchorTs) },
                 applyRemoteArm: { [weak self] in self?.dependencies.applyRemoteArm() },
                 applyRemoteDisarm: { [weak self] in self?.dependencies.applyRemoteDisarm() },
                 updateTimeSyncServerState: { [weak self] confirmed, syncId in
