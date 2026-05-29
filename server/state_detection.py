@@ -168,6 +168,7 @@ def ingest_live_frame(
             frame_lo, frame_hi,
             anchor_a=anchor_lo,
             anchor_b=anchor_hi,
+            pair_key=(cam_lo, cam_hi),
         )
 
     created = live.ingest(camera_id, frame, triangulate_live, anchors=anchors)

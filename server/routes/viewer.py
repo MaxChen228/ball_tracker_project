@@ -339,52 +339,6 @@ def results_for_session(session_id: str) -> SessionResult:
     return r
 
 
-# Segment-only trajectory projection for downstream 3D viewers (Godot
-# sim/, future notebook tooling). Intentionally omits raw triangulated
-# points — those stay on `/results/{sid}` for dashboard debug rendering.
-# Wire is the canonical ballistic-fit form: clients reconstruct a
-# continuous curve via
-#
-#     p(τ) = p0 + v0·(τ - t_anchor) + 0.5·G·(τ - t_anchor)²
-#
-# where G is in server world frame (X right, Y down-range from home
-# toward pitcher, Z up; g = (0, 0, -9.81)). Frame transform to the
-# consumer's local coords (e.g. Godot's Y-up) is the consumer's job —
-# this endpoint always emits server world.
-@router.get("/sessions/{session_id}/trajectory")
-def session_trajectory(session_id: str, algorithm: str | None = None) -> dict[str, Any]:
-    from main import state
-    result = state.get(session_id)
-    if result is None:
-        raise HTTPException(404, f"session {session_id} not found")
-    algo = algorithm if algorithm is not None else IOS_CAPTURE_TIME_ALGORITHM_ID
-    if algo not in result.segments_by_algorithm:
-        raise HTTPException(
-            404,
-            f"session {session_id} has no segments for algorithm {algo!r}; "
-            f"available: {sorted(result.segments_by_algorithm.keys())}",
-        )
-    segs = result.segments_by_algorithm[algo]
-    return {
-        "session_id": session_id,
-        "algorithm_id": algo,
-        "frame": "server_world",
-        "gravity": [0.0, 0.0, -9.81],
-        "segments": [
-            {
-                "p0": list(s.p0),
-                "v0": list(s.v0),
-                "t_anchor": s.t_anchor,
-                "t_start": s.t_start,
-                "t_end": s.t_end,
-                "rmse_m": s.rmse_m,
-                "speed_kph": s.speed_kph,
-            }
-            for s in segs
-        ],
-    }
-
-
 @router.get("/viewer/{session_id}", response_class=HTMLResponse)
 def viewer(session_id: str) -> HTMLResponse:
     from main import state

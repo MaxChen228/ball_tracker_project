@@ -231,6 +231,7 @@ def _tri_point() -> TriangulatedPoint:
     return TriangulatedPoint(
         t_rel_s=0.1, x_m=1.0, y_m=2.0, z_m=3.0, residual_m=0.01,
         cost_a=0.5, cost_b=0.4,
+        pair_key=("A","B"),
     )
 
 

@@ -69,6 +69,7 @@ class _FakeTriangulatePair:
                 t_rel_s=float(i) * 0.1,
                 x_m=float(marker), y_m=0.0, z_m=0.0,
                 residual_m=0.01, cost_a=0.0, cost_b=0.0,
+                pair_key=("A","B"),
             )
             for i in range(2)
         ]

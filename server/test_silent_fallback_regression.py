@@ -33,6 +33,7 @@ def _make_triangulated_point():
         residual_m=0.01,
         cost_a=None,
         cost_b=None,
+        pair_key=("A","B"),
     )
 
 

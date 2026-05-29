@@ -482,6 +482,15 @@ class TriangulatedPoint(BaseModel):
     # rather than silently default-None.
     cost_a: float | None
     cost_b: float | None
+    # Canonical cam-pair label (sorted tuple, e.g. ("A","B")) identifying
+    # which two cameras produced this point. Required as of Phase 3a (N-cam
+    # support): with N≥3 cams each triangulated point belongs to exactly
+    # one stereo pair, and downstream consumers (segmenter, viewer overlay
+    # toggles, lab-fit per-pair stats) need to know which one without
+    # reverse-looking up via source_a_cand_idx / cam_id_a heuristics. N=2
+    # rigs produce ("A","B") everywhere, preserving the pre-N behaviour
+    # bit-for-bit.
+    pair_key: tuple[str, str]
 
 
 class SegmentRecord(BaseModel):
@@ -507,6 +516,11 @@ class SessionResult(BaseModel):
     `CycleResult` now that "cycle" is a per-device recording-window concept
     and the pitch unit is server-level "session"."""
     model_config = ConfigDict(extra="forbid")
+    # On-disk schema version. v2 (current) requires every TriangulatedPoint
+    # to carry a `pair_key` (Phase 3a). Pre-v2 persisted results are
+    # rejected on read (CLAUDE.md: 實驗階段禁止向後相容 — operator reruns
+    # the session rather than receiving silently-stripped pair labels).
+    schema_version: Literal[2] = 2
     session_id: str
     # camera_id → "did this session ingest a PitchPayload from that cam".
     # Keys are whatever camera_ids the rig knows about (today "A"/"B";

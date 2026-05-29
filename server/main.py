@@ -180,7 +180,6 @@ from routes import device_ws as _device_ws_routes
 from routes import devices as _devices_routes
 from routes import presets as _presets_routes
 from routes import algorithms as _algorithms_routes
-from routes import sim_events as _sim_events_routes
 app.include_router(_markers_routes.router)
 app.include_router(_settings_routes.router)
 app.include_router(_camera_routes.router)
@@ -194,7 +193,6 @@ app.include_router(_device_ws_routes.router)
 app.include_router(_devices_routes.router)
 app.include_router(_presets_routes.router)
 app.include_router(_algorithms_routes.router)
-app.include_router(_sim_events_routes.router)
 
 # Re-exports for routes/* late-bind imports — defined in routes/pitch.py but
 # accessed via `from main import _run_server_detection` etc.

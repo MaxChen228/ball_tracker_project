@@ -223,13 +223,15 @@ def test_segmenter_filters_input_by_per_algorithm_cost_threshold(monkeypatch):
         pts.append(TriangulatedPoint(
             t_rel_s=t, x_m=float(pos[0]), y_m=float(pos[1]), z_m=float(pos[2]),
             residual_m=0.001,
-            cost_a=0.10, cost_b=0.10,  # real ball, below 0.20 gate
+            cost_a=0.10, cost_b=0.10,
+            pair_key=("A","B"),  # real ball, below 0.20 gate
         ))
         pts.append(TriangulatedPoint(
             t_rel_s=t, x_m=float(pos[0]) + 5.0, y_m=float(pos[1]),
             z_m=float(pos[2]),  # distractor 5 m sideways
             residual_m=0.001,
-            cost_a=0.80, cost_b=0.80,  # above 0.20 gate
+            cost_a=0.80, cost_b=0.80,
+            pair_key=("A","B"),  # above 0.20 gate
         ))
 
     snap = DetectionConfigSnapshotPayload(

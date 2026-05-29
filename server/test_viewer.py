@@ -229,7 +229,7 @@ def test_build_scene_all_upward_rays_still_render():
     P_up = np.array([0.0, 0.2, 3.0])  # all frames point upward
     pitch = _pitch("A", 1, K, R_a, t_a, H_a, np.array([P_up]))
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None)
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B"))
     ]
 
     scene = build_scene(sid(1), {"A": pitch}, triangulated=tri)
@@ -273,8 +273,8 @@ def test_build_scene_skips_triangulated_beyond_max_render_dist():
     pa = _pitch("A", 9, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 9, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None),   # in
-        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None),  # out
+        main.TriangulatedPoint(t_rel_s=0.0, x_m=0.1, y_m=0.2, z_m=0.3, residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B")),   # in
+        main.TriangulatedPoint(t_rel_s=0.1, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B")),  # out
     ]
     scene = build_scene(sid(9), {"A": pa, "B": pb}, triangulated=tri)
 
@@ -308,6 +308,7 @@ def test_build_scene_two_cameras_attaches_triangulated_points():
             x_m=P[0], y_m=P[1], z_m=P[2],
             residual_m=1e-6,
             cost_a=None, cost_b=None,
+            pair_key=("A","B"),
         )
         for i, P in enumerate(P_path)
     ]
@@ -339,10 +340,12 @@ def test_build_scene_ships_cost_a_and_cost_b_on_triangulated_dicts():
         main.TriangulatedPoint(
             t_rel_s=0.0, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6,
             cost_a=0.25, cost_b=0.40,
+            pair_key=("A","B"),
         ),
         main.TriangulatedPoint(
             t_rel_s=0.01, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6,
             cost_a=None, cost_b=None,
+            pair_key=("A","B"),
         ),
     ]
     scene = build_scene(sid(14), {"A": pa, "B": pb}, triangulated=tri)
@@ -368,7 +371,7 @@ def test_build_scene_stamps_seg_idx_on_triangulated_when_session_result_has_segm
     pa = _pitch("A", 11, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 11, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None)
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B"))
         for i, P in enumerate(P_path)
     ]
     # Two segments: [0, 1] in seg 0, [2] in seg 1.
@@ -412,7 +415,7 @@ def test_build_scene_stamps_seg_idx_minus_one_for_out_of_segment_points():
     pa = _pitch("A", 12, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 12, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None)
+        main.TriangulatedPoint(t_rel_s=i / 240.0, x_m=P[0], y_m=P[1], z_m=P[2], residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B"))
         for i, P in enumerate(P_path)
     ]
     # Segment claims only index 0 — point 1 is an outlier.
@@ -447,9 +450,9 @@ def test_build_scene_seg_idx_survives_render_distance_filter():
     pa = _pitch("A", 13, K, R_a, t_a, H_a, P_path)
     pb = _pitch("B", 13, K, R_b, t_b, H_b, P_path)
     tri = [
-        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6, cost_a=None, cost_b=None),
-        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None),  # >10m, dropped
-        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6, cost_a=None, cost_b=None),
+        main.TriangulatedPoint(t_rel_s=0.00, x_m=0.1, y_m=0.3, z_m=1.0, residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B")),
+        main.TriangulatedPoint(t_rel_s=0.01, x_m=50.0, y_m=0.0, z_m=0.0, residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B")),  # >10m, dropped
+        main.TriangulatedPoint(t_rel_s=0.02, x_m=0.2, y_m=0.5, z_m=1.2, residual_m=1e-6, cost_a=None, cost_b=None, pair_key=("A","B")),
     ]
     # Three segments, one per point (extreme case — index 1 is the dropped one).
     segs = [
@@ -2021,81 +2024,3 @@ def test_history_dropdown_hidden_when_single_run():
     assert _history_dropdown_html(ctx) == ""
 
 
-# ---------------------------------------------------------------------------
-# GET /sessions/{sid}/trajectory — Godot/sim-facing segment projection
-# ---------------------------------------------------------------------------
-
-def _seed_session_with_segments(session_id: str, algorithm_id: str) -> None:
-    """Drop a SessionResult straight into state.results so we can exercise
-    the trajectory endpoint without spinning a real pairing+segmenter run.
-    Mirrors the seeding pattern already used elsewhere in this file."""
-    seg = schemas.SegmentRecord(
-        indices=[0, 1, 2],
-        original_indices=[0, 1, 2],
-        p0=[0.0, 0.0, 1.5],
-        v0=[0.1, 35.0, 5.0],
-        t_anchor=0.0,
-        t_start=0.0,
-        t_end=0.5,
-        rmse_m=0.012,
-        speed_kph=126.4,
-    )
-    result = schemas.SessionResult(
-        session_id=session_id,
-        cameras_received={"A": True, "B": True},
-        segments_by_algorithm={algorithm_id: [seg]},
-    )
-    main.state.results[session_id] = result
-
-
-def test_session_trajectory_returns_segments_in_server_world_frame():
-    session_id = sid(42)
-    _seed_session_with_segments(session_id, schemas.IOS_CAPTURE_TIME_ALGORITHM_ID)
-    client = TestClient(app)
-    r = client.get(f"/sessions/{session_id}/trajectory")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["session_id"] == session_id
-    assert body["algorithm_id"] == schemas.IOS_CAPTURE_TIME_ALGORITHM_ID
-    assert body["frame"] == "server_world"
-    assert body["gravity"] == [0.0, 0.0, -9.81]
-    assert len(body["segments"]) == 1
-    s = body["segments"][0]
-    # Raw points / index arrays must NOT leak — wire is fit-only.
-    assert "indices" not in s
-    assert "original_indices" not in s
-    assert s["p0"] == [0.0, 0.0, 1.5]
-    assert s["v0"] == [0.1, 35.0, 5.0]
-    assert s["t_anchor"] == 0.0
-    assert s["t_end"] == 0.5
-    assert s["rmse_m"] == pytest.approx(0.012)
-    assert s["speed_kph"] == pytest.approx(126.4)
-
-
-def test_session_trajectory_404_when_session_missing():
-    client = TestClient(app)
-    r = client.get(f"/sessions/{sid(43)}/trajectory")
-    assert r.status_code == 404
-
-
-def test_session_trajectory_404_when_algorithm_missing():
-    """Default algorithm is `ios_capture_time` (live). A session that
-    only has server_post results must surface a clean 404 listing what
-    IS available, not silently return an empty `segments: []`."""
-    session_id = sid(44)
-    _seed_session_with_segments(session_id, "v11_hsv_cc")  # server_post-only
-    client = TestClient(app)
-    r = client.get(f"/sessions/{session_id}/trajectory")
-    assert r.status_code == 404
-    detail = r.json()["detail"]
-    assert "ios_capture_time" in detail
-    assert "v11_hsv_cc" in detail
-
-
-def test_session_trajectory_explicit_algorithm_query():
-    session_id = sid(45)
-    _seed_session_with_segments(session_id, "v11_hsv_cc")
-    client = TestClient(app)
-    r = client.get(f"/sessions/{session_id}/trajectory?algorithm=v11_hsv_cc")
-    assert r.status_code == 200
-    assert r.json()["algorithm_id"] == "v11_hsv_cc"

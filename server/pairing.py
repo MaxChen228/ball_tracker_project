@@ -242,6 +242,7 @@ def triangulate_live_pair(
     *,
     anchor_a: float,
     anchor_b: float,
+    pair_key: tuple[str, str],
 ) -> list[TriangulatedPoint]:
     """Hot-path multi-candidate triangulation for the live A/B ray pair.
 
@@ -299,6 +300,7 @@ def triangulate_live_pair(
                 source_b_cand_idx=cb_idx,
                 cost_a=ca.cost,
                 cost_b=cb.cost,
+                pair_key=pair_key,
             ))
     return out
 
@@ -360,10 +362,11 @@ def triangulate_pair_rays(
     filtering (per-algorithm `cost_threshold` + operator `gap_threshold_m`)
     happens in `session_results._passes_stamped_filter`."""
     if a.intrinsics is None or a.homography is None:
-        raise ValueError("camera A missing calibration (run Calibrate in iPhone app)")
+        raise ValueError(f"camera {a.camera_id} missing calibration (run Calibrate in iPhone app)")
     if b.intrinsics is None or b.homography is None:
-        raise ValueError("camera B missing calibration (run Calibrate in iPhone app)")
+        raise ValueError(f"camera {b.camera_id} missing calibration (run Calibrate in iPhone app)")
 
+    pkey = pair_key(a.camera_id, b.camera_id)
     K_a, R_a, _, C_a = _camera_pose(a.intrinsics, a.homography)
     K_b, R_b, _, C_b = _camera_pose(b.intrinsics, b.homography)
 
@@ -430,6 +433,7 @@ def triangulate_pair_rays(
                         source_b_cand_idx=cb_idx,
                         cost_a=ca.cost,
                         cost_b=cb.cost,
+                        pair_key=pkey,
                     ))
 
     logger.info(

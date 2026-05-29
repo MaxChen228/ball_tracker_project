@@ -465,6 +465,7 @@ def test_triangulate_live_pair_matches_triangulate_pair_rays():
     live_points = pairing.triangulate_live_pair(
         pose_a, pose_b, fa, fb,
         anchor_a=anchor, anchor_b=anchor,
+        pair_key=("A", "B"),
     )
     assert len(live_points) == 1
     live_pt = live_points[0]
