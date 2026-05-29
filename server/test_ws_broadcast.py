@@ -147,6 +147,19 @@ def test_live_websocket_stream_pairs_frames_and_emits_events(monkeypatch):
             "sid": session_id,
             "reason": "disarmed",
         })
+        # `path_completed` is broadcast asynchronously when the server
+        # processes each cycle_end. Wait for both cams' completion to
+        # land before tearing down the WS — without this the events-list
+        # assertions below race the broadcast (flaky under full-suite
+        # timing pressure).
+        assert wait_for_event(
+            lambda name, data: name == "path_completed"
+            and data["sid"] == session_id and data["cam"] == "A"
+        )
+        assert wait_for_event(
+            lambda name, data: name == "path_completed"
+            and data["sid"] == session_id and data.get("point_count") == 1
+        )
 
     result = client.get(f"/results/{session_id}").json()
     assert len(result["points"]) == 1

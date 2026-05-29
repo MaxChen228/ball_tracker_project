@@ -182,6 +182,38 @@ def sync_quick_state() -> dict[str, Any]:
     }
 
 
+@router.post("/sync/quick_apply/{sync_id}")
+def sync_quick_apply(sync_id: str) -> dict[str, Any]:
+    """Apply the most-recent solved quick-sync's per-cam anchors to the
+    device registry, so live pairing's anchor-relative window math picks
+    them up. Without this step a quick sync solves and renders on the
+    dashboard but never reaches the field live pairing reads.
+
+    Idempotent: re-applying the same sync_id re-stamps the identical
+    anchors. Listeners that missed the chirp are in `missing_cam_ids`
+    and are NOT stamped (no silent fallback — operator re-syncs or
+    proceeds without that cam)."""
+    from main import state
+    result = state.sync.last_quick_sync_result()
+    if result is None:
+        raise HTTPException(status_code=404, detail="no_result")
+    if result.aborted:
+        raise HTTPException(status_code=409, detail="aborted")
+    if result.id != sync_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"reason": "stale_sync_id", "expected": result.id},
+        )
+    for cam, anchor in sorted(result.anchors_pts_s.items()):
+        state.set_device_sync_anchor(cam, anchor, result.id)
+    return {
+        "ok": True,
+        "sync_id": sync_id,
+        "applied": sorted(result.anchors_pts_s.keys()),
+        "missing": list(result.missing_cam_ids),
+    }
+
+
 @router.get("/sync/audio/{filename}")
 def sync_audio_download(filename: str) -> FileResponse:
     from main import state
