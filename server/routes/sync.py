@@ -151,6 +151,7 @@ async def sync_quick_audio_upload(
         raise HTTPException(status_code=409, detail={"ok": False, "error": "no_sync"})
     if reason == "stale_sync_id":
         raise HTTPException(status_code=409, detail={"ok": False, "error": "stale_sync_id"})
+    assert reason is None, f"unhandled sync reason {reason!r}"
     resp: dict[str, Any] = {
         "ok": True,
         "solved": result is not None,
@@ -287,6 +288,7 @@ async def sync_audio_upload(
         raise HTTPException(status_code=409, detail={"ok": False, "error": "no_sync"})
     if reason == "stale_sync_id":
         raise HTTPException(status_code=409, detail={"ok": False, "error": "stale_sync_id"})
+    assert reason is None, f"unhandled sync reason {reason!r}"
     resp: dict[str, Any] = {
         "ok": True,
         "solved": result is not None,
@@ -318,6 +320,7 @@ async def sync_report(report: SyncReport) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail={"ok": False, "error": "no_sync"})
     if reason == "stale_sync_id":
         raise HTTPException(status_code=409, detail={"ok": False, "error": "stale_sync_id"})
+    assert reason is None, f"unhandled sync reason {reason!r}"
     resp: dict[str, Any] = {"ok": True, "solved": result is not None}
     if result is not None:
         resp["result"] = result.model_dump()

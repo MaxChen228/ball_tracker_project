@@ -278,6 +278,10 @@ def triangulate_live_pair(
     # cost_threshold + the operator's gap_threshold_m.
     out: list[TriangulatedPoint] = []
     for ca_idx, ca in enumerate(cands_a):
+        # cost is None for the no-video pitch path (iOS ships candidates
+        # but the server never runs detection to stamp a selector cost),
+        # so the gate must skip the ceiling check rather than assert —
+        # see test_post_pitch_mode_two_accepts_frames_without_video.
         if ca.cost is not None and ca.cost > _EMIT_COST_CEILING:
             continue
         d_a_cam = _ray_for_frame(ca.px, ca.py, pose_a.K, pose_a.dist)
@@ -405,6 +409,8 @@ def triangulate_pair_rays(
             cands_a = _frame_candidates(frame_a)
             cands_b = _frame_candidates(frame_b)
             for ca_idx, ca in enumerate(cands_a):
+                # cost None on the no-video pitch path (no server
+                # detection ran to stamp it); skip ceiling, don't assert.
                 if ca.cost is not None and ca.cost > _EMIT_COST_CEILING:
                     drop_cost += 1
                     continue
