@@ -12,6 +12,16 @@ bursts per band and taking the median arrival across bursts (see
 If you change any of the timing constants here (durations, frequencies),
 update the matching defaults in `AudioSyncDetector.swift` on the iOS side so
 the detector expects the same bands.
+
+NOTE — two distinct waveforms live in this module, do not conflate them:
+- The `SYNC_BAND_*` constants + `_hann_chirp` above drive the **band-based
+  mutual / quick sync** detection path (per-band single sweeps, matched-
+  filtered on-device).
+- `chirp_wav_bytes()` below is the **legacy `/chirp.wav` playback waveform**
+  (a 2→8 kHz up+down dual sweep, 150 ms center-to-center) served to a third
+  speaker via `GET /chirp.wav`. It is independent of the band detector and
+  its constants are local to that function — changing `SYNC_BAND_*` does NOT
+  change it, and vice versa.
 """
 
 from __future__ import annotations
