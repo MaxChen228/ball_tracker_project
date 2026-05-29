@@ -1,0 +1,50 @@
+# Godot 4+ project ignores
+# --- Generated/Build artifacts ---
+.godot/
+bin/
+obj/
+.mono/
+.vs/
+
+# --- OS artifacts ---
+.DS_Store
+.DS_Store?
+._*
+
+# --- IDE/Editor ---
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+
+# --- Godot editor backups ---
+*.tscn.bak
+*.tres.bak
+*.csproj.old
+*.sln.old
+
+# --- Platform exports ---
+/exports/
+/android/
+/ios/
+/macos/
+/windows/
+/linux/
+
+# --- Shader cache ---
+*.d3d12.cache
+*.metal.cache
+*.cache
+
+# --- NuGet ---
+packages/
+*.nupkg
+
+# --- Mono temp ---
+*.deps.json
+*.runtimeconfig.json
+*.AssemblyInfo.cs
+AssemblyInfo.cs

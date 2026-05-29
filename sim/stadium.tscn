@@ -1,0 +1,361 @@
+[gd_scene format=3 uid="uid://ksj2625n2mqc"]
+
+[ext_resource type="Script" uid="uid://c7hvanxplmjnj" path="res://ScoreBugUI.cs" id="1_51f8d"]
+[ext_resource type="Script" uid="uid://81ot0rf4f2lb" path="res://Baseball.cs" id="1_lashf"]
+[ext_resource type="Script" uid="uid://bw7q8g74w25kd" path="res://PitchDecisionMenu.cs" id="1_rguky"]
+[ext_resource type="Script" uid="uid://cc0yhydgwrwxi" path="res://StadiumDisplays.cs" id="3_qdk54"]
+[ext_resource type="Script" uid="uid://cceraynigpsgm" path="res://DefenseManager.cs" id="6_s075v"]
+[ext_resource type="Script" uid="uid://b887yo5v4bqax" path="res://Fielder.cs" id="7_24ump"]
+[ext_resource type="Script" uid="uid://4odi4myidhf7" path="res://BallTrackingCamera.cs" id="8_track"]
+[ext_resource type="Script" uid="uid://boukruutv3qwc" path="res://ManualInputUI.cs" id="9_input"]
+[ext_resource type="Script" uid="uid://cuebu847rcpb6" path="res://CameraSpeedUI.cs" id="10_speed"]
+[ext_resource type="Script" uid="uid://settings123" path="res://SettingsUI.cs" id="13_settings"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_rguky"]
+bg_color = Color(0.22745098, 0, 0.47843137, 0.8)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_51f8d"]
+bg_color = Color(1, 1, 1, 0)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_lroxp"]
+albedo_color = Color(0.29411766, 0.9882353, 0.07058824, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_lroxp"]
+radius = 0.037
+height = 0.074
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_51f8d"]
+cull_mode = 2
+albedo_color = Color(1, 0, 0, 1)
+
+[sub_resource type="ImmediateMesh" id="ImmediateMesh_jp60y"]
+
+[sub_resource type="SphereMesh" id="SphereMesh_qdk54"]
+radius = 0.037
+height = 0.074
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_rguky"]
+shading_mode = 0
+albedo_color = Color(1, 0.1882353, 0.34901962, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_qdk54"]
+size = Vector3(0.43, 0.6, 0.05)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_qdk54"]
+transparency = 1
+albedo_color = Color(1, 0.84313726, 1, 1)
+
+[sub_resource type="Environment" id="Environment_qdk54"]
+glow_enabled = true
+glow_normalized = true
+glow_strength = 1.4
+glow_bloom = 0.2
+
+[node name="Stadium" type="Node3D" unique_id=339705511]
+
+[node name="ScoreBugUI" type="CanvasLayer" parent="." unique_id=178935787]
+script = ExtResource("1_51f8d")
+
+[node name="ScoreBugMargin" type="MarginContainer" parent="ScoreBugUI" unique_id=1594193855]
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -40.0
+offset_top = -143.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_constants/margin_left = 20
+theme_override_constants/margin_top = 20
+theme_override_constants/margin_right = 20
+theme_override_constants/margin_bottom = 20
+
+[node name="MainBackground" type="PanelContainer" parent="ScoreBugUI/ScoreBugMargin" unique_id=1153412564]
+layout_mode = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_rguky")
+
+[node name="MainVBox" type="VBoxContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground" unique_id=242430338]
+layout_mode = 2
+
+[node name="TopSection" type="HBoxContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox" unique_id=1496396892]
+layout_mode = 2
+theme_override_constants/separation = 20
+
+[node name="TeamScoresGrid" type="GridContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection" unique_id=1523975883]
+layout_mode = 2
+columns = 3
+
+[node name="TeamALogo" type="TextureRect" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/TeamScoresGrid" unique_id=582771376]
+layout_mode = 2
+
+[node name="TeamAName" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/TeamScoresGrid" unique_id=1790126965]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "A"
+
+[node name="TeamAScore" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/TeamScoresGrid" unique_id=630737662]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "0"
+
+[node name="TeamBLogo" type="TextureRect" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/TeamScoresGrid" unique_id=829105446]
+layout_mode = 2
+
+[node name="TeamBName" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/TeamScoresGrid" unique_id=640232224]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "B"
+
+[node name="TeamBScore" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/TeamScoresGrid" unique_id=941131418]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "0"
+
+[node name="BaseAndOuts" type="VBoxContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection" unique_id=1638202226]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 20
+
+[node name="BasesDiamond" type="Control" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts" unique_id=1421114212]
+custom_minimum_size = Vector2(50, 50)
+layout_mode = 2
+
+[node name="Base1" type="Panel" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts/BasesDiamond" unique_id=1271300363]
+layout_mode = 0
+offset_left = 50.0
+offset_top = 25.0
+offset_right = 74.0
+offset_bottom = 49.0
+rotation = 0.7853982
+theme_override_styles/panel = SubResource("StyleBoxFlat_51f8d")
+
+[node name="Base2" type="Panel" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts/BasesDiamond" unique_id=399220966]
+layout_mode = 0
+offset_left = 25.0
+offset_right = 49.0
+offset_bottom = 24.0
+rotation = 0.7853982
+theme_override_styles/panel = SubResource("StyleBoxFlat_51f8d")
+
+[node name="Base3" type="Panel" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts/BasesDiamond" unique_id=284498064]
+layout_mode = 0
+offset_top = 25.0
+offset_right = 24.0
+offset_bottom = 49.0
+rotation = 0.7853982
+theme_override_styles/panel = SubResource("StyleBoxFlat_51f8d")
+
+[node name="OutsHBox" type="HBoxContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts" unique_id=1320315784]
+layout_mode = 2
+alignment = 1
+
+[node name="Out1" type="ColorRect" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts/OutsHBox" unique_id=597308317]
+custom_minimum_size = Vector2(20, 20)
+layout_mode = 2
+
+[node name="Out2" type="ColorRect" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/BaseAndOuts/OutsHBox" unique_id=1130662130]
+custom_minimum_size = Vector2(20, 20)
+layout_mode = 2
+
+[node name="CountAndInning" type="VBoxContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection" unique_id=538914630]
+layout_mode = 2
+
+[node name="InningLabel" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/CountAndInning" unique_id=1351735756]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "▼ 1"
+
+[node name="CountLabel" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/TopSection/CountAndInning" unique_id=28048911]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "0-0"
+
+[node name="SeparatorLine" type="ColorRect" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox" unique_id=1807740003]
+custom_minimum_size = Vector2(0, 2)
+layout_mode = 2
+
+[node name="BatterSection" type="HBoxContainer" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox" unique_id=1586675254]
+layout_mode = 2
+
+[node name="BatterName" type="Label" parent="ScoreBugUI/ScoreBugMargin/MainBackground/MainVBox/BatterSection" unique_id=1321266381]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "BATTER A"
+
+[node name="UI" type="CanvasLayer" parent="." unique_id=680051302]
+
+[node name="PitchDecisionMenu" type="PanelContainer" parent="UI" unique_id=627583557]
+visible = false
+layout_mode = 1
+theme_override_styles/panel = SubResource("StyleBoxFlat_rguky")
+script = ExtResource("1_rguky")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/PitchDecisionMenu" unique_id=1012750125]
+layout_mode = 2
+theme_override_constants/separation = 10
+alignment = 1
+
+[node name="BtnInPlay" type="Button" parent="UI/PitchDecisionMenu/VBoxContainer" unique_id=1395144352]
+custom_minimum_size = Vector2(160, 40)
+layout_mode = 2
+text = "打擊"
+
+[node name="BtnNoSwing" type="Button" parent="UI/PitchDecisionMenu/VBoxContainer" unique_id=983067691]
+custom_minimum_size = Vector2(160, 40)
+layout_mode = 2
+text = "沒揮"
+
+[node name="BtnFoulTip" type="Button" parent="UI/PitchDecisionMenu/VBoxContainer" unique_id=89253875]
+custom_minimum_size = Vector2(160, 40)
+layout_mode = 2
+text = "擦棒"
+
+[node name="BtnMiss" type="Button" parent="UI/PitchDecisionMenu/VBoxContainer" unique_id=1786785265]
+custom_minimum_size = Vector2(160, 40)
+layout_mode = 2
+text = "揮棒落空"
+
+[node name="BtnFoulTipCaught" type="Button" parent="UI/PitchDecisionMenu/VBoxContainer" unique_id=1123407977]
+custom_minimum_size = Vector2(160, 40)
+layout_mode = 2
+text = "擦棒接殺"
+
+[node name="SecondBase" type="CSGBox3D" parent="." unique_id=176292735]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -38.8)
+size = Vector3(0.4, 0.2, 0.4)
+
+[node name="FirstBase" type="CSGBox3D" parent="." unique_id=2125965399]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 19.4, 0, -19.4)
+size = Vector3(0.4, 0.2, 0.4)
+
+[node name="Field" type="CSGBox3D" parent="." unique_id=31943612]
+size = Vector3(250, 0.1, 250)
+material = SubResource("StandardMaterial3D_lroxp")
+
+[node name="HomePlate" type="CSGBox3D" parent="." unique_id=912458365]
+size = Vector3(0.5, 0.2, 0.5)
+
+[node name="Mound" type="CSGCylinder3D" parent="." unique_id=1230054987]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -18.44)
+radius = 2.0
+height = 0.2
+
+[node name="ThirdBase" type="CSGBox3D" parent="." unique_id=3912487]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -19.4, 0, -19.4)
+size = Vector3(0.4, 0.2, 0.4)
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1336138486]
+transform = Transform3D(1, 0, 0, 0, 0.8660254, 0.5, 0, -0.5, 0.8660254, 0, 15, 15)
+script = ExtResource("8_track")
+
+[node name="Baseball" type="Node3D" parent="." unique_id=1546006126]
+script = ExtResource("1_lashf")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Baseball" unique_id=2023015391]
+mesh = SubResource("SphereMesh_lroxp")
+
+[node name="TrajectoryLine" type="MeshInstance3D" parent="Baseball" unique_id=568313050]
+top_level = true
+material_override = SubResource("StandardMaterial3D_51f8d")
+mesh = SubResource("ImmediateMesh_jp60y")
+
+[node name="PitchMarker" type="MeshInstance3D" parent="Baseball" unique_id=1932693477]
+mesh = SubResource("SphereMesh_qdk54")
+surface_material_override/0 = SubResource("StandardMaterial3D_rguky")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=727416361]
+transform = Transform3D(1, 0, 0, 0, 0.70710677, 0.70710677, 0, -0.70710677, 0.70710677, 0, 0, 0)
+
+[node name="OutfieldWalls" type="Node3D" parent="." unique_id=1094746384]
+
+[node name="CSGBox3D" type="CSGBox3D" parent="OutfieldWalls" unique_id=2009422190]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, -120)
+size = Vector3(80, 4, 1)
+
+[node name="CSGBox3D2" type="CSGBox3D" parent="OutfieldWalls" unique_id=1625881298]
+transform = Transform3D(0.70710677, 0, 0.70710677, 0, 1, 0, -0.70710677, 0, 0.70710677, -60, 2, -85)
+size = Vector3(80, 4, 1)
+
+[node name="CSGBox3D3" type="CSGBox3D" parent="OutfieldWalls" unique_id=1090128647]
+transform = Transform3D(0.70710677, 0, -0.70710677, 0, 1, 0, 0.70710677, 0, 0.70710677, 60, 2, -85)
+size = Vector3(80, 4, 1)
+
+[node name="StadiumDisplays" type="Node3D" parent="." unique_id=1612309459]
+script = ExtResource("3_qdk54")
+
+[node name="CenterBoard" type="Label3D" parent="StadiumDisplays" unique_id=947650299]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 30, -125)
+pixel_size = 0.05
+text = "B:0 S:0 O:0"
+font_size = 300
+
+[node name="StrikeZone" type="MeshInstance3D" parent="." unique_id=1118563804]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
+mesh = SubResource("BoxMesh_qdk54")
+surface_material_override/0 = SubResource("StandardMaterial3D_qdk54")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1070370455]
+environment = SubResource("Environment_qdk54")
+
+[node name="ManualInputUI" type="CanvasLayer" parent="." unique_id=999999999]
+script = ExtResource("9_input")
+BaseballNodePath = NodePath("../Baseball")
+
+[node name="CameraSpeedUI" type="CanvasLayer" parent="." unique_id=888888888]
+script = ExtResource("10_speed")
+
+[node name="SettingsUI" type="CanvasLayer" parent="." unique_id=777777777]
+script = ExtResource("13_settings")
+
+[node name="DefenseManager" type="Node3D" parent="." unique_id=1726504440]
+script = ExtResource("6_s075v")
+
+[node name="P" type="CSGCylinder3D" parent="DefenseManager" unique_id=671455703]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="C" type="CSGCylinder3D" parent="DefenseManager" unique_id=1033721809]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="SS" type="CSGCylinder3D" parent="DefenseManager" unique_id=1768823758]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="LF" type="CSGCylinder3D" parent="DefenseManager" unique_id=1244019084]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="CF" type="CSGCylinder3D" parent="DefenseManager" unique_id=1979489639]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="RF" type="CSGCylinder3D" parent="DefenseManager" unique_id=1417503054]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="FirstBase" type="CSGCylinder3D" parent="DefenseManager" unique_id=1135352781]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="SecondBase" type="CSGCylinder3D" parent="DefenseManager" unique_id=341633645]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
+
+[node name="ThirdBase" type="CSGCylinder3D" parent="DefenseManager" unique_id=1466585428]
+radius = 0.3
+height = 1.8
+script = ExtResource("7_24ump")
