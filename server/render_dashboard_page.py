@@ -14,6 +14,7 @@ from render_dashboard_events import _render_events_body
 from render_dashboard_html import render_dashboard_html as _render_dashboard_html
 from render_dashboard_device_pool import _render_device_pool_body
 from render_dashboard_intrinsics import _render_intrinsics_body
+from render_dashboard_quick_sync import _render_quick_sync_body
 from render_dashboard_session import _render_hsv_body, _render_session_body
 from render_dashboard_style import _CSS
 from cam_view_ui import CAM_VIEW_RUNTIME_JS
@@ -123,6 +124,13 @@ def render_events_index_html(
         assignments=device_pool_assignments,
         observed_unassigned=device_pool_observed,
     )
+    # Emitter dropdown seeded from live online cams (not expected_camera_ids):
+    # POST /sync/quick_start returns 409 emitter_offline for an offline cam,
+    # so seeding from EXPECTED would hand the operator a foot-gun on first
+    # paint before the JS tick reconciles.
+    quick_sync_html = _render_quick_sync_body(
+        online_cam_ids=[dev.camera_id for dev in state.online_devices()],
+    )
     return _render_dashboard_html(
         css=_CSS,
         nav_html=nav_html,
@@ -132,6 +140,7 @@ def render_events_index_html(
         strike_zone_html=strike_zone_html,
         intrinsics_html=intrinsics_html,
         device_pool_html=device_pool_html,
+        quick_sync_html=quick_sync_html,
         events_html=events_html,
         scene_div=scene_div,
         scene_runtime_html=scene_runtime_fragment,
