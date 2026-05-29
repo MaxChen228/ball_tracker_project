@@ -172,6 +172,7 @@ def test_detect_sync_report_role_a_maps_bands_correctly() -> None:
         audio_start_pts_s=1000.0,
         emit_at_s_self=emit_self,
         emit_at_s_other=emit_other,
+        peak_threshold=0.18,
     )
 
     expected_t_self = 1000.0 + (5000 + ref_len / 2.0) / SAMPLE_RATE
@@ -213,6 +214,7 @@ def test_detect_sync_report_role_b_is_mirrored() -> None:
         audio_start_pts_s=0.0,
         emit_at_s_self=emit_self,
         emit_at_s_other=emit_other,
+        peak_threshold=0.18,
     )
     expected_t_self = (15000 + ref_len / 2.0) / SAMPLE_RATE
     expected_t_other = (5000 + ref_len / 2.0) / SAMPLE_RATE
@@ -227,6 +229,7 @@ def test_detect_sync_report_rejects_invalid_role() -> None:
             wav_bytes=wav, sync_id="sy_ffff", camera_id="A", role="C",
             audio_start_pts_s=0.0,
             emit_at_s_self=[0.1], emit_at_s_other=[0.2],
+            peak_threshold=0.18,
         )
 
 
@@ -291,3 +294,70 @@ def test_median_band_detection_all_weak_falls_back_but_stays_sub_floor() -> None
     assert out.center_pts_s == 2.0           # median over all (no strong subset)
     assert out.peak_norm == 0.05             # median peak, sub-floor
     assert out.peak_norm < threshold         # gate sees honest weak signal
+
+
+def test_detect_quick_sync_report_aborts_on_noise() -> None:
+    """A recording with NO chirp (pure faint noise) must abort with
+    `weak_detection` and a null anchor — not silently return the argmax
+    of noise as a fake anchor. Peak floor = chirp_detect_threshold."""
+    rng = np.random.default_rng(99)
+    audio = rng.normal(0.0, 0.01, size=int(SAMPLE_RATE * 1.2)).astype(np.float32)
+    wav = _make_wav_bytes(audio, SAMPLE_RATE)
+    report, debug = sync_audio_detect.detect_quick_sync_report(
+        wav_bytes=wav, sync_id="sy_a0a0a001", camera_id="A",
+        audio_start_pts_s=0.0, emit_at_s=[0.3, 0.5, 0.7],
+        peak_threshold=0.18,
+    )
+    assert debug["peak"] < 0.18, f"noise peak should be sub-floor, got {debug['peak']}"
+    assert report.aborted is True
+    assert report.abort_reason == "weak_detection"
+    assert report.anchor_pts_s is None
+
+
+def test_detect_quick_sync_report_solves_clean_chirp() -> None:
+    """Clean chirp at the emit schedule must clear the floor and return a
+    real anchor (guards against the floor being so high it rejects good
+    detections)."""
+    audio = _synth_recording(
+        sample_rate=SAMPLE_RATE, duration_s=1.2,
+        chirp_f0=SYNC_BAND_A_F0, chirp_f1=SYNC_BAND_A_F1,
+        chirp_start_sample=int(0.5 * SAMPLE_RATE),
+    )
+    wav = _make_wav_bytes(audio, SAMPLE_RATE)
+    ref_len = int(SAMPLE_RATE * SYNC_CHIRP_DURATION_S)
+    emit_t = (0.5 * SAMPLE_RATE + ref_len / 2.0) / SAMPLE_RATE
+    report, debug = sync_audio_detect.detect_quick_sync_report(
+        wav_bytes=wav, sync_id="sy_c1ea0001", camera_id="A",
+        audio_start_pts_s=0.0, emit_at_s=[emit_t],
+        peak_threshold=0.18,
+    )
+    assert debug["peak"] > 0.8
+    assert report.aborted is False
+    assert report.anchor_pts_s is not None
+
+
+def test_detect_sync_report_aborts_when_one_band_is_noise() -> None:
+    """Role A hears its own A-chirp clearly but the peer B-chirp is absent
+    (peer silent / too far): the report must abort with a null
+    `t_from_other_s` so the mutual solver routes to its abort path instead
+    of differencing against a noise argmax."""
+    audio = _synth_recording(
+        sample_rate=SAMPLE_RATE, duration_s=1.2,
+        chirp_f0=SYNC_BAND_A_F0, chirp_f1=SYNC_BAND_A_F1,
+        chirp_start_sample=5000,
+    )  # band A present, band B never injected
+    wav = _make_wav_bytes(audio, SAMPLE_RATE)
+    ref_len = int(SAMPLE_RATE * SYNC_CHIRP_DURATION_S)
+    report, debug = sync_audio_detect.detect_sync_report(
+        wav_bytes=wav, sync_id="sy_4a4a1111", camera_id="A", role="A",
+        audio_start_pts_s=0.0,
+        emit_at_s_self=[(5000 + ref_len / 2.0) / SAMPLE_RATE],
+        emit_at_s_other=[(15000 + ref_len / 2.0) / SAMPLE_RATE],
+        peak_threshold=0.18,
+    )
+    assert debug["peak_self"] > 0.8
+    assert debug["peak_other"] < 0.18
+    assert report.aborted is True
+    assert report.abort_reason == "weak_detection"
+    assert report.t_self_s is not None
+    assert report.t_from_other_s is None

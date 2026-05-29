@@ -186,7 +186,7 @@ camera_id: str                       # the handshake-resolved camera_id this soc
 paths: list[str]                     # default DetectionPath set for newly-armed sessions (always {"live"} post-Phase-1)
 hsv_range: {h_min,h_max,s_min,s_max,v_min,v_max}  # from data/detection_config.json (POST /detection/config)
 shape_gate: {aspect_min, fill_min}   # from data/detection_config.json (POST /detection/config)
-chirp_detect_threshold: float        # matched-filter cutoff for legacy chirp-listener path; data/runtime_settings.json key "chirp_detect_threshold"
+chirp_detect_threshold: float        # normalized matched-filter peak floor (0–1). Doubles as the server-side detection floor: `sync_audio_detect.detect_quick_sync_report` / `detect_sync_report` flag `aborted` + `weak_detection` (null timestamp/anchor) when a band's aggregate peak is below it, so noise can't argmax into a fake anchor. Peak — not PSR — is the discriminator (windowed correlation clips at 1.0 → PSR ~1.0 for both clean and noise). data/runtime_settings.json key "chirp_detect_threshold"
 heartbeat_interval_s: float          # cadence iOS uses for upstream {type:"heartbeat"}; data/runtime_settings.json key "heartbeat_interval_s"
 tracking_exposure_cap: str           # TrackingExposureCapMode enum: "frame_duration" (sensor-managed, up to full frame time ≤ 1/fps) | "shutter_500" (1/500 s cap) | "shutter_1000" (1/1000 s cap, 240 fps motion-freeze use case); data/runtime_settings.json key "tracking_exposure_cap"
 capture_height_px: int               # 1080 / 720 etc. — iOS picks the matching 240 fps format; data/runtime_settings.json key "capture_height_px"
@@ -238,6 +238,28 @@ Pushed by `routes/sync.py::start_sync` (near the per-cam broadcast loop) when an
 type: "sync_command"
 command: str                         # currently always "start"
 sync_command_id: str                 # server-minted run id; iOS echoes it back as time_sync_id
+```
+
+#### `type: "sync_quick_run"` — single-emitter, N-listener quick sync
+
+Pushed by `routes/sync.py::sync_quick_start` to every online cam when an operator starts a quick sync from the dashboard. Replaces the A↔B mutual chirp for the huddle-then-place workflow: one cam (`emitter_cam_id`) plays a single band-A chirp; every cam — emitter included — records and uploads its WAV to `POST /sync/quick_audio_upload` (same payload shape for emitter and listeners). The server matched-filters band A off each WAV and the emitter's self-hear anchor is the run's zero point. Each WAV's aggregate peak is gated by `chirp_detect_threshold`: a listener below the floor reports `aborted`/`weak_detection` (null anchor) → lands in `missing_cam_ids` rather than contributing a noise-argmax fake anchor; the emitter below the floor aborts the whole run (no zero point). `emit_at_s` is the same `params.emit_a_at_s` list for every cam regardless of role — the emitter always plays band A, which is what lets any cam be the emitter (the N-cam enabler). Handled in `ball_tracker/CameraCommandRouter.swift` (`case "sync_quick_run"`).
+
+```
+type: "sync_quick_run"
+sync_id: str                         # the quick-sync run id
+is_emitter: bool                     # true → this cam plays the band-A chirp; all cams record
+emit_at_s: [float]                   # engine-relative offsets at which the emitter plays (listeners ignore)
+record_duration_s: float             # mic recording window length
+```
+
+#### `type: "quick_sync_applied"` — adopt server-solved anchor
+
+Pushed by `routes/sync.py::sync_quick_apply` to each **stamped** cam after an operator applies a solved quick sync. The quick-sync anchor is cross-correlated server-side, so iOS never locally detected it; this push hands the cam its own anchor (its chirp-arrival PTS on its own clock) so it adopts it as `lastSyncAnchor`. Without it, the next `heartbeat` carries the device's local anchor (nil for a quick-only phone, or a stale mutual value) and would wipe / clobber the registry anchor `quick_apply` just wrote — the device is the source of truth the heartbeat contract assumes. A cam in `missing_cam_ids` gets no push. Handled in `ball_tracker/CameraCommandRouter.swift` (`case "quick_sync_applied"`).
+
+```
+type: "quick_sync_applied"
+sync_id: str                         # the applied quick-sync run id; iOS latches it as time_sync_id
+sync_anchor_timestamp_s: float       # this cam's chirp-arrival PTS on its own clock
 ```
 
 #### `type: "calibration_updated"` — peer cam re-calibrated
@@ -418,6 +440,6 @@ Preset CRUD; params validated by `algorithms.get(algorithm_id).detector.params_s
 ### Operator audit checklist (when changing wire shapes)
 
 Per project memory `feedback_ws_only_means_check_all_command_paths`, after any WS schema edit grep for every send/receive site:
-- Server → iOS sends: `_settings_message_for`, `_arm_message_for`, `_disarm_message_for`, the inline `sync_run` dict in `routes/device_ws.py::ws_device`, the `sync_command` push in `routes/sync.py::start_sync` (near the per-cam broadcast loop), and the `calibration_updated` push in `routes/calibration.py::_handle_calibration_completed` (near the broadcast call at the end of the function).
+- Server → iOS sends: `_settings_message_for`, `_arm_message_for`, `_disarm_message_for`, the inline `sync_run` dict in `routes/device_ws.py::ws_device`, the `sync_command` push in `routes/sync.py::start_sync` (near the per-cam broadcast loop), the `sync_quick_run` broadcast in `routes/sync.py::sync_quick_start`, the `quick_sync_applied` broadcast in `routes/sync.py::sync_quick_apply`, and the `calibration_updated` push in `routes/calibration.py::_handle_calibration_completed` (near the broadcast call at the end of the function).
 - iOS → server receivers: the four `if mtype == "..."` branches in `routes/device_ws.py::ws_device` (`hello` / `heartbeat` / `frame` / `cycle_end`).
 - iOS encoders: `ball_tracker/ServerUploader.swift` Codable structs **and** `ball_tracker/LiveFrameDispatcher.swift` hand-encoded dict (the dispatch-queue path that bypasses Codable — abfa422 was the bug where this was forgotten).

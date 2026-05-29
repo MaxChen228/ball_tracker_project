@@ -28,6 +28,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case standby
         case timeSyncWaiting
         case mutualSyncing
+        case quickSyncing
         case recording
     }
 
@@ -322,6 +323,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         if state == .mutualSyncing {
             syncCoordinator.abortMutualSync(reason: "view dismissed")
         }
+        if state == .quickSyncing {
+            syncCoordinator.abortQuickSync(reason: "view dismissed")
+        }
     }
 
     deinit {
@@ -410,7 +414,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .recording:
             return trackingFps
-        case .standby, .timeSyncWaiting, .mutualSyncing:
+        case .standby, .timeSyncWaiting, .mutualSyncing, .quickSyncing:
             return standbyFps
         }
     }
@@ -530,6 +534,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 refreshUI: { [weak self] in self?.updateUIForState() },
                 makeMutualSyncAudio: { emitAtS, recordDurationS in
                     MutualSyncAudio(emitAtS: emitAtS, recordingDurationS: recordDurationS)
+                },
+                makeQuickSyncAudio: { emitAtS, recordDurationS, isEmitter in
+                    QuickSyncAudio(recordingDurationS: recordDurationS, emitAtS: emitAtS, isEmitter: isEmitter)
                 }
             )
         )
@@ -555,6 +562,12 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
                 startTimeSync: { [weak self] syncId in self?.syncCoordinator.startTimeSync(syncId: syncId) },
                 applyMutualSync: { [weak self] syncId, emitAtS, recordDurationS in
                     self?.syncCoordinator.applyMutualSync(syncId: syncId, emitAtS: emitAtS, recordDurationS: recordDurationS)
+                },
+                applyQuickSync: { [weak self] syncId, isEmitter, emitAtS, recordDurationS in
+                    self?.syncCoordinator.applyQuickSync(syncId: syncId, isEmitter: isEmitter, emitAtS: emitAtS, recordDurationS: recordDurationS)
+                },
+                adoptQuickSyncAnchor: { [weak self] syncId, anchorTs in
+                    self?.syncCoordinator.adoptQuickSyncAnchor(syncId: syncId, anchorTimestampS: anchorTs)
                 },
                 applyRemoteArm: { [weak self] in self?.applyRemoteArm() },
                 applyRemoteDisarm: { [weak self] in self?.applyRemoteDisarm() },
@@ -691,7 +704,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         switch state {
         case .standby:
             enterRecordingMode()
-        case .timeSyncWaiting, .mutualSyncing, .recording:
+        case .timeSyncWaiting, .mutualSyncing, .quickSyncing, .recording:
             // Active state — arm is a no-op. `.timeSyncWaiting` finishes
             // on its own and returns to standby; next heartbeat re-sends
             // the arm command and this branch flips us into recording.
@@ -710,6 +723,8 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             syncCoordinator.cancelTimeSync(reason: "disarmed")
         case .mutualSyncing:
             syncCoordinator.abortMutualSync(reason: "disarmed")
+        case .quickSyncing:
+            syncCoordinator.abortQuickSync(reason: "disarmed")
         case .recording:
             recordingWorkflow.handleRemoteDisarm(
                 currentSessionId: snapshotSessionId(),
@@ -872,6 +887,7 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         case .standby: return "STANDBY"
         case .timeSyncWaiting: return "TIME_SYNC"
         case .mutualSyncing: return "MUTUAL_SYNC"
+        case .quickSyncing: return "QUICK_SYNC"
         case .recording: return "RECORDING"
         }
     }

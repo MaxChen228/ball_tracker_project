@@ -8,6 +8,7 @@
   tickEvents();
   tickIntrinsics();
   tickDevicePool();
+  tickQuickSync();
   // /status polling is now a safety fallback — SSE `device_status` and
   // `device_heartbeat` drive the Devices card in real-time. 5 s covers
   // SSE reconnect gaps without spamming the server at 1 Hz.
@@ -20,6 +21,13 @@
   setInterval(tickEvents, 15000);
   setInterval(tickIntrinsics, 5000);
   setInterval(tickDevicePool, 5000);
+  // Quick sync: 1 s cadence. Two reasons it can't be lower-frequency:
+  // (a) /sync/quick_state is the canonical timeout-driver — the server's
+  // _check_quick_sync_timeout_locked fires only when current_quick_sync()
+  // is *read*, so without persistent polling a stalled run hangs past its
+  // 12 s budget. (b) During an active run the operator wants per-cam
+  // received-anchors progress as it lands.
+  setInterval(tickQuickSync, 1000);
   // Re-check the degraded banner without waiting for a new device_status
   // event — the grace window ticks forward even when no events arrive,
   // so the banner needs its own cadence to flip on at the right moment.

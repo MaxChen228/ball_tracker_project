@@ -30,6 +30,7 @@ def render_dashboard_html(
     strike_zone_html: str,
     intrinsics_html: str,
     device_pool_html: str,
+    quick_sync_html: str,
     events_html: str,
     scene_div: str,
     scene_runtime_html: str,
@@ -118,6 +119,10 @@ def render_dashboard_html(
         '<div class="card" data-collapsible-key="dash:card:device-pool">'
         '<h2 class="card-title" data-collapsible-header>Device Pool</h2>'
         f'<div id="device-pool-body" data-collapsible-body>{device_pool_html}</div>'
+        "</div>"
+        '<div class="card" data-collapsible-key="dash:card:quick-sync">'
+        '<h2 class="card-title" data-collapsible-header>Quick Sync</h2>'
+        f'<div id="quick-sync-body" data-collapsible-body>{quick_sync_html}</div>'
         "</div>"
         '<div class="card">'
         '<div class="events-toolbar">'
