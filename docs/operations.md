@@ -61,6 +61,20 @@ Architecture: pairing emits the full geometrically-plausible set under absolute 
 
 The slider never changes pairing emit, so a stamped `gap=0.01` cannot lose data — re-drag to loose values + Apply restores everything. For cases where you actually want fewer emitted points (disk pressure), the absolute ceilings live in `server/pairing.py::_EMIT_*_CEILING` and require a server restart.
 
+## Quick sync (multi-cam, single-emitter)
+
+The N-camera acoustic time-sync flow. Replaces the A↔B mutual chirp for huddle-then-place setups (N≥2 supported; N=1 trivially solves to a smoke-test anchor).
+
+1. Cluster all phones <10 cm apart (propagation delay is intentionally NOT compensated; clustering keeps it < ~0.3 ms).
+2. Sidebar **Quick Sync** card → pick an emitter from the dropdown (seeded from currently-online cams; offline picks are rejected by `POST /sync/quick_start` with 409 `emitter_offline`).
+3. **Start quick sync** → server broadcasts `sync_quick_run`. The emitter plays one 100 ms band-A (2000–4000 Hz) chirp; every cam (emitter included) records ~2 s and uploads its WAV to `POST /sync/quick_audio_upload`. Server matched-filters band A off every WAV; the emitter's self-hear anchor is the run's zero point. The dynamic block shows `Received: A,B / 3` style progress.
+4. When the block flips to **Solved: sy_…** with per-cam anchors, click **Apply anchors** → server stamps `Device.sync_anchor_timestamp_s` for each solved cam **and** WS-pushes `quick_sync_applied` back so iOS adopts the value as `lastSyncAnchor`. Without this push the next heartbeat (carrying the device's local nil anchor) would wipe the registry value the route just wrote — the apply round-trip is what closes the loop.
+5. Cams in `Missing: …` are NOT stamped (no silent fallback). Either re-run quick sync or proceed without that cam — its rays will be dropped from live pairing.
+
+Start is disabled while a session is armed (an active recording owns the audio pipeline). A 10 s cooldown blocks rapid-fire retries after each run.
+
+Degraded mode — emitter never self-hears (mic muted / speaker capped): the run aborts, the dashboard shows **aborted — emitter self-hear missing**, no anchor is stamped. Pick a different emitter or check the device's media-volume slider.
+
 ## Degraded / fallback modes
 
 - **No 時間校正 before arm**: `sync_anchor_timestamp_s` uploads as `null`. Server skips detection + triangulation and flags the session `error="no time sync"`. Re-run 時間校正 and re-arm.
