@@ -11,15 +11,23 @@ SAFETY: The HTTP server must NOT be running — concurrent writes to
 `data/results/session_*.json` will corrupt them. Script aborts if it
 detects a listener on 8765.
 
+AUDIT: every run (including --dry-run) writes a JSON diff log to
+`data/migrations/dedupe-backfill-<epoch>.json` capturing per-session
+before/after segment counts + each segment's `original_indices`, so the
+exact set of dropped segments is recoverable for review. Run --dry-run
+first to inspect the change distribution before committing the rewrite.
+
 Usage:
-    cd server && uv run python backfill_dedupe.py
-    # add --dry-run to just count what would change
+    cd server && uv run python backfill_dedupe.py --dry-run  # preview + log
+    cd server && uv run python backfill_dedupe.py            # write + log
 """
 from __future__ import annotations
 
 import argparse
+import json
 import socket
 import sys
+import time
 from pathlib import Path
 
 # Allow `python backfill_dedupe.py` from anywhere.
@@ -64,6 +72,11 @@ def main() -> int:
     changed = 0
     unchanged = 0
     failed = 0
+    # Per-session audit record. For changed sessions we keep both the
+    # count delta AND each segment's original_indices before/after, so a
+    # reviewer can see exactly which segments the new dedupe dropped
+    # (recoverable by re-running detection / reverting the segmenter).
+    audit: dict[str, object] = {}
     for sid in sids:
         try:
             old = state.results[sid]
@@ -86,6 +99,16 @@ def main() -> int:
                         deltas.append(f"{alg}: {o}→{n}")
                 print(f"  {sid}  Δ  {'  '.join(deltas)}")
                 changed += 1
+                audit[sid] = {
+                    "before": {
+                        alg: [list(s.original_indices) for s in segs]
+                        for alg, segs in old.segments_by_algorithm.items()
+                    },
+                    "after": {
+                        alg: [list(s.original_indices) for s in segs]
+                        for alg, segs in new.segments_by_algorithm.items()
+                    },
+                }
             else:
                 unchanged += 1
             if not args.dry_run:
@@ -94,8 +117,23 @@ def main() -> int:
             print(f"  {sid}  FAIL  {exc}")
             failed += 1
 
+    # Always emit the audit log (even dry-run) so the change distribution
+    # can be inspected before committing the rewrite.
+    migrations_dir = state._data_dir / "migrations"
+    migrations_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+    suffix = "dry-run" if args.dry_run else "applied"
+    log_path = migrations_dir / f"dedupe-backfill-{stamp}-{suffix}.json"
+    log_path.write_text(json.dumps({
+        "epoch": stamp,
+        "dry_run": args.dry_run,
+        "summary": {"changed": changed, "unchanged": unchanged, "failed": failed},
+        "sessions": audit,
+    }, indent=2))
+
     print(f"\n{'DRY-RUN ' if args.dry_run else ''}done — "
           f"changed={changed}  unchanged={unchanged}  failed={failed}")
+    print(f"audit log: {log_path}")
     return 0 if failed == 0 else 1
 
 

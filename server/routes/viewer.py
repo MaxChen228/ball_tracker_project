@@ -172,8 +172,9 @@ def _build_viewer_health(session_id: str) -> dict[str, Any]:
             algorithms_run.append({
                 "algorithm_id": algo_id,
                 "preset_name": snap.preset_name if snap is not None else None,
-                "frame_count_a": int(counts.get("A", 0)),
-                "frame_count_b": int(counts.get("B", 0)),
+                # N-cam: per-cam frame counts keyed by camera_id, not the
+                # fixed frame_count_a/b pair.
+                "frame_counts": {cam: int(n) for cam, n in sorted(counts.items())},
                 "is_active": algo_id == active_server_post_algorithm_id,
             })
     return {

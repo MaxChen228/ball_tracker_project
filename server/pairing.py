@@ -463,7 +463,10 @@ def pair_key_str(key: tuple[str, str]) -> str:
 
 def triangulate_all_pairs(
     pitches: dict[str, PitchPayload], *, source: str = "server",
-) -> dict[tuple[str, str], list[TriangulatedPoint]]:
+) -> tuple[
+    dict[tuple[str, str], list[TriangulatedPoint]],
+    list[tuple[str, str, str]],
+]:
     """N-camera triangulation as C(N,2) independent stereo pairs — the
     pair-as-atom design: any two cameras reconstruct a point, so N cameras
     emit one trajectory per camera pair. A camera that's blind for part of
@@ -471,30 +474,40 @@ def triangulate_all_pairs(
     keep reconstructing — the dead-angle rescue motivation for going
     N-camera.
 
-    Returns `{(cam_i, cam_j): points}` for every pair whose BOTH cameras
-    carry calibration. A pair missing calibration on either side is SKIPPED
-    (logged), not silently zero-filled — the operator sees which pairs ran.
-    N=2 collapses to the single `{('A','B'): triangulate_pair_rays(A,B)}`
-    entry, behaviourally identical to the pre-N path."""
+    Returns `(points_by_pair, skipped_pairs)`:
+      - `points_by_pair`: `{(cam_i, cam_j): points}` for every pair whose
+        BOTH cameras carry calibration.
+      - `skipped_pairs`: list of `(cam_i, cam_j, reason)` for pairs missing
+        calibration on either side. Caller is expected to surface these
+        via `SessionResult.abort_reasons` so the operator sees which pairs
+        actually contributed (no silent zero-fill per CLAUDE.md).
+
+    N=2 collapses to one entry in `points_by_pair`, behaviourally
+    identical to the pre-N path modulo the new return tuple shape."""
     cam_ids = sorted(pitches.keys())
     out: dict[tuple[str, str], list[TriangulatedPoint]] = {}
+    skipped: list[tuple[str, str, str]] = []
     for ci, cj in combinations(cam_ids, 2):
         a, b = pitches[ci], pitches[cj]
         if a.intrinsics is None or a.homography is None:
+            reason = f"cam_{ci}_uncalibrated"
             logger.info(
-                "triangulate_all_pairs skip pair=%s|%s reason=cam_%s_uncalibrated",
-                ci, cj, ci,
+                "triangulate_all_pairs skip pair=%s|%s reason=%s",
+                ci, cj, reason,
             )
+            skipped.append((ci, cj, reason))
             continue
         if b.intrinsics is None or b.homography is None:
+            reason = f"cam_{cj}_uncalibrated"
             logger.info(
-                "triangulate_all_pairs skip pair=%s|%s reason=cam_%s_uncalibrated",
-                ci, cj, cj,
+                "triangulate_all_pairs skip pair=%s|%s reason=%s",
+                ci, cj, reason,
             )
+            skipped.append((ci, cj, reason))
             continue
         out[(ci, cj)] = triangulate_pair_rays(a, b, source=source)
     logger.info(
-        "triangulate_all_pairs complete cams=%s pairs_emitted=%d",
-        cam_ids, len(out),
+        "triangulate_all_pairs complete cams=%s pairs_emitted=%d skipped=%d",
+        cam_ids, len(out), len(skipped),
     )
-    return out
+    return out, skipped

@@ -999,8 +999,9 @@ def test_build_viewer_health_surfaces_algorithms_run_excluding_live_path():
     assert "v11_hsv_cc" in algo_ids
     v11 = next(a for a in health["algorithms_run"] if a["algorithm_id"] == "v11_hsv_cc")
     assert v11["is_active"] is True
-    assert v11["frame_count_a"] >= 1
-    assert v11["frame_count_b"] == 0  # B never recorded
+    # N-cam frame_counts dict keyed by camera_id (replaces frame_count_a/b).
+    assert v11["frame_counts"].get("A", 0) >= 1
+    assert v11["frame_counts"].get("B", 0) == 0  # B never recorded
     assert health["active_server_post_algorithm_id"] == "v11_hsv_cc"
 
 
@@ -1804,8 +1805,9 @@ def test_events_path_status_marks_live_done_on_frame_existence_not_triangulation
         block_end = len(html_body)
     chip_block = html_body[block_start:block_end]
     assert 'class="ev-pipe on"' in chip_block
-    # Per-cam A·B layout — A=2, B absent renders as "2·—" inside the bold.
-    assert '<b>2·—</b>' in chip_block
+    # N-cam layout: only contributing cams appear in the bold (no fixed
+    # A·B slots), so a live-only-A session renders just "2".
+    assert '<b>2</b>' in chip_block
 
 
 def test_index_endpoint_lists_events_with_viewer_links():

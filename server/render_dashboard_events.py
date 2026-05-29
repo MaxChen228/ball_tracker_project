@@ -169,9 +169,10 @@ def _pipe_chip(label: str, status: str, counts: dict[str, int] | None,
         cls += " armed"
     counts = counts or {}
     if counts:
-        a = str(int(counts["A"])) if "A" in counts else "—"
-        b = str(int(counts["B"])) if "B" in counts else "—"
-        body = f'<b>{a}·{b}</b>'
+        # N-cam: show every contributing cam's count, not just A·B.
+        body = '<b>' + '·'.join(
+            str(int(n)) for _, n in sorted(counts.items())
+        ) + '</b>'
         title = title_base + " · " + ", ".join(
             f"{c}:{n}" for c, n in sorted(counts.items())
         )

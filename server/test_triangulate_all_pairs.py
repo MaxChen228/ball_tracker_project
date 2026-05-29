@@ -58,7 +58,8 @@ def _scene_n3():
 
 def test_n3_emits_all_three_pairs():
     pitches, path = _scene_n3()
-    result = pairing.triangulate_all_pairs(pitches)
+    result, skipped = pairing.triangulate_all_pairs(pitches)
+    assert skipped == []
     assert set(result.keys()) == {("A", "B"), ("A", "C"), ("B", "C")}
     for key, pts in result.items():
         assert len(pts) == len(path), key
@@ -70,7 +71,8 @@ def test_n3_emits_all_three_pairs():
 def test_n2_collapses_to_single_pair():
     pitches, path = _scene_n3()
     two = {"A": pitches["A"], "B": pitches["B"]}
-    result = pairing.triangulate_all_pairs(two)
+    result, skipped = pairing.triangulate_all_pairs(two)
+    assert skipped == []
     assert set(result.keys()) == {("A", "B")}
     # Identical to the direct single-pair primitive.
     direct = pairing.triangulate_pair_rays(pitches["A"], pitches["B"])
@@ -81,8 +83,11 @@ def test_uncalibrated_camera_pair_skipped():
     pitches, _ = _scene_n3()
     # Strip C's calibration → pairs involving C must be skipped, A|B survives.
     pitches["C"] = pitches["C"].model_copy(update={"intrinsics": None, "homography": None})
-    result = pairing.triangulate_all_pairs(pitches)
+    result, skipped = pairing.triangulate_all_pairs(pitches)
     assert set(result.keys()) == {("A", "B")}
+    # The two skipped pairs are surfaced (no silent zero-fill).
+    assert {(ci, cj) for ci, cj, _ in skipped} == {("A", "C"), ("B", "C")}
+    assert all("cam_C_uncalibrated" == reason for _, _, reason in skipped)
 
 
 def test_pair_key_canonical_and_serialisation():

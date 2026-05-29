@@ -52,40 +52,62 @@ _FROZEN_USED_FIELDS = (
 )
 
 
+class PitchConfigDivergenceError(ValueError):
+    """Raised when 2+ cams hold distinct non-None frozen-config snapshots
+    for the same field. Caller catches → writes a SessionResult
+    abort_reason so the operator sees the divergence explicitly
+    (CLAUDE.md bans silent A-wins fallback)."""
+
+
+class ServerPostPointerMismatchError(ValueError):
+    """Raised when 2+ cams hold distinct non-None
+    `active_server_post_algorithm_id` values. Caller catches → writes
+    a SessionResult abort_reason."""
+
+
 def aggregate_pitch_used_configs(
-    a: PitchPayload | None,
-    b: PitchPayload | None,
+    pitches_by_cam: dict[str, PitchPayload],
     sid: str,
 ) -> dict[str, object | None]:
-    """Aggregate the per-pitch per-path frozen config snapshots into a
-    single mapping. Policy: A wins, fall back to B. Divergence (operator
-    edited config mid-cycle) logs warning, doesn't raise — diagnostic,
-    not crashable. Shared by `rebuild_result` and reprocess so both paths
-    enforce identical aggregation."""
+    """Aggregate the per-pitch per-path frozen config snapshots across
+    every participating camera. Policy: every non-None snapshot must
+    agree; raise `PitchConfigDivergenceError` on divergence (CLAUDE.md
+    no-silent-fallback). Returns one canonical value per field, or
+    None if every cam's snapshot is None for that field.
+
+    Shared by `rebuild_result` and reprocess so both paths enforce
+    identical aggregation across N cameras."""
     out: dict[str, object | None] = {}
     for field_name in _FROZEN_USED_FIELDS:
-        va = getattr(a, field_name) if a is not None else None
-        vb = getattr(b, field_name) if b is not None else None
-        if va is not None and vb is not None and va != vb:
-            logger.warning(
-                "session %s A/B %s diverged (operator edited config "
-                "mid-cycle?) — using A", sid, field_name,
-            )
-        out[field_name] = va if va is not None else vb
+        seen: dict[str, object] = {}
+        for cam in sorted(pitches_by_cam):
+            v = getattr(pitches_by_cam[cam], field_name)
+            if v is not None:
+                seen[cam] = v
+        if not seen:
+            out[field_name] = None
+            continue
+        chosen = next(iter(seen.values()))
+        for v in seen.values():
+            if v != chosen:
+                per_cam = ", ".join(f"{c}={v!r}" for c, v in seen.items())
+                raise PitchConfigDivergenceError(
+                    f"session {sid} {field_name} diverged across cams: {per_cam}"
+                )
+        out[field_name] = chosen
     return out
 
 
 def _stamp_frozen_config_on_result(
     result: SessionResult,
-    a: PitchPayload | None,
-    b: PitchPayload | None,
+    pitches_by_cam: dict[str, PitchPayload],
 ) -> None:
     """Mirror per-pitch per-path frozen snapshots onto the SessionResult's
     canonical `config_used_by_algorithm` dict + `active_server_post_algorithm_id`
-    pointer. Aggregation policy (A wins, fall back to B) lives in
-    `aggregate_pitch_used_configs` so reprocess + rebuild share one
-    source of truth."""
-    used = aggregate_pitch_used_configs(a, b, result.session_id)
+    pointer. Aggregation lives in `aggregate_pitch_used_configs` so
+    reprocess + rebuild share one source of truth. Raises on cross-cam
+    divergence — caller decides whether to translate to abort_reason."""
+    used = aggregate_pitch_used_configs(pitches_by_cam, result.session_id)
     live_snap = used.get("live_config_used")
     if live_snap is not None:
         result.config_used_by_algorithm[IOS_CAPTURE_TIME] = live_snap
@@ -97,8 +119,7 @@ def _stamp_frozen_config_on_result(
 
 def stamp_active_pointer_projection(
     result: SessionResult,
-    a: PitchPayload | None,
-    b: PitchPayload | None,
+    pitches_by_cam: dict[str, PitchPayload],
 ) -> None:
     """Fast-path companion to `rebuild_result_for_session` — re-stamps
     the four derived projections that change when the active
@@ -111,14 +132,19 @@ def stamp_active_pointer_projection(
     pointer flips (frames + calibration + emit ceilings unchanged), so
     no per-bucket triangulation is needed.
 
-    Pre-condition: `a` / `b` pitches' `active_server_post_algorithm_id`
-    are already flipped to the target alg, and `result` is a private
-    copy (use `model_copy(deep=True)` on the cached result before
-    calling — `stamp_segments_on_result` mutates dicts in-place).
+    Pre-condition: every participating pitch's
+    `active_server_post_algorithm_id` is already flipped to the target
+    alg, and `result` is a private copy (use `model_copy(deep=True)` on
+    the cached result before calling — `stamp_segments_on_result`
+    mutates dicts in-place).
 
     Called from `state.set_active_server_post_algorithm`. The slow path
     (`rebuild_result_for_session`) still applies on cache miss, mono
     session, or `sync_error` — see that caller for the dispatch.
+
+    Raises `PitchConfigDivergenceError` if any cam's frozen-config
+    snapshot diverges from the others; the fast-path caller falls
+    through to the canonical rebuild on this error.
     """
     # Match rebuild's `empty_result_for_session` semantics for the
     # frozen-config dict: clear before stamping so the prior active
@@ -126,46 +152,39 @@ def stamp_active_pointer_projection(
     # `_stamp_frozen_config_on_result` re-populates `live_config` from
     # `pitch.live_config_used` and the new active alg's snap.
     result.config_used_by_algorithm.clear()
-    _stamp_frozen_config_on_result(result, a, b)
+    _stamp_frozen_config_on_result(result, pitches_by_cam)
     stamp_segments_on_result(
         result, legacy_points_path=DetectionPath.server_post,
     )
 
 
 def _resolve_server_post_alg_for_result(
-    a: PitchPayload | None, b: PitchPayload | None,
+    pitches_by_cam: dict[str, PitchPayload],
 ) -> str | None:
-    """Resolve the server_post algorithm id this result should pin
-    based on the participating pitches' active pointers. A wins, B
-    falls back. Returns None when neither pitch has a server_post
-    pointer (live-only flow). Result writers that need to file
-    `server_post`-path frames into `triangulated_by_algorithm` call
-    this BEFORE the path-loop runs so the bucket name is known.
+    """Resolve the server_post algorithm id this result should pin by
+    iterating every participating cam's `active_server_post_algorithm_id`:
 
-    Cross-cam mismatch (A=v11, B=v12) logs a warning and picks A's
-    pointer; the path-loop then triangulates B's frames against A's
-    bucket. `_triangulate_non_current_algorithms` handles the alg
-    each side does NOT share so the un-paired side still surfaces.
-    Operator action to recover: rerun `/run_server_post` on both cams
-    with the same preset / algorithm."""
-    if (
-        a is not None and b is not None
-        and a.active_server_post_algorithm_id is not None
-        and b.active_server_post_algorithm_id is not None
-        and a.active_server_post_algorithm_id != b.active_server_post_algorithm_id
-    ):
-        logger.warning(
-            "session %s server_post pointer mismatch A=%s B=%s — "
-            "path-loop will pair B's frames into A's bucket; rerun "
-            "/run_server_post on both cams to recover",
-            a.session_id,
-            a.active_server_post_algorithm_id,
-            b.active_server_post_algorithm_id,
-        )
-    for pitch in (a, b):
-        if pitch is not None and pitch.active_server_post_algorithm_id is not None:
-            return pitch.active_server_post_algorithm_id
-    return None
+      - all pointers None → return None (live-only / never ran server_post)
+      - exactly one distinct non-None value → return it
+      - 2+ distinct values → raise `ServerPostPointerMismatchError`
+
+    Caller catches → records to `result.abort_reasons` so the operator
+    sees an explicit signal instead of a silent A-wins fallback.
+    """
+    distinct: dict[str, str] = {}
+    for cam in sorted(pitches_by_cam):
+        v = pitches_by_cam[cam].active_server_post_algorithm_id
+        if v is not None:
+            distinct[cam] = v
+    values = set(distinct.values())
+    if not values:
+        return None
+    if len(values) == 1:
+        return next(iter(values))
+    per_cam = ", ".join(f"{c}={a}" for c, a in distinct.items())
+    raise ServerPostPointerMismatchError(
+        f"server_post pointer mismatch across cams: {per_cam}"
+    )
 
 
 def triangulate_pair(
@@ -224,39 +243,25 @@ def pitches_by_cam_for_session(
     return out
 
 
-def _representative_pair(
-    pitches_by_cam: dict[str, PitchPayload],
-) -> tuple[PitchPayload | None, PitchPayload | None]:
-    """Pick the first two cams (lex-sorted) for helpers that still operate
-    on a representative pair — config aggregation, frozen-pointer
-    resolution, etc. N=2 yields (A, B) exactly; N=3 also yields (A, B)
-    so the existing aggregation policy is preserved bit-for-bit; cams
-    beyond the second are ignored by those helpers (divergence among
-    3+ cams is operator error and the existing A/B warning surface is
-    sufficient diagnostic until a future multi-cam config UI lands)."""
-    cams = sorted(pitches_by_cam.keys())
-    first = pitches_by_cam[cams[0]] if cams else None
-    second = pitches_by_cam[cams[1]] if len(cams) >= 2 else None
-    return first, second
-
-
 def triangulate_all_pairs_for_session(
     state: "State",
     pitches_by_cam: dict[str, PitchPayload],
     *, source: str = "server",
-) -> list[TriangulatedPoint]:
+) -> tuple[list[TriangulatedPoint], list[tuple[str, str, str]]]:
     """N-cam triangulation wrapper. Scales each pitch's intrinsics +
     homography to its MOV grid (existing `scale_pitch_to_video_dims`),
     delegates to `pairing.triangulate_all_pairs` for the C(N,2) fan-out,
-    and returns a flat list sorted by `t_rel_s`. Each point carries its
-    own `pair_key` (stamped by `triangulate_pair_rays`).
+    and returns `(flat_points, skipped_pairs)`:
+      - `flat_points`: every pair's points flattened + sorted by
+        `t_rel_s`. Each point carries its own `pair_key` (stamped by
+        `triangulate_pair_rays`).
+      - `skipped_pairs`: `(cam_i, cam_j, reason)` for pairs dropped
+        because a cam lacked calibration. Caller records these to
+        `SessionResult.abort_reasons` (no silent zero-fill per CLAUDE.md).
 
     N=2 collapses to one pair, producing output identical to the
     pre-N-cam single-pair `triangulate_pair` call (modulo the `pair_key`
-    field already required since Phase 3a).
-
-    Pairs whose cam lacks calibration are skipped + logged inside
-    `triangulate_all_pairs` — no silent zero-fill."""
+    field already required since Phase 3a)."""
     scaled: dict[str, PitchPayload] = {}
     with state._lock:
         cals = {cam: state._calibration_store.get(cam) for cam in pitches_by_cam}
@@ -264,12 +269,12 @@ def triangulate_all_pairs_for_session(
         cal = cals.get(cam)
         dims = (cal.image_width_px, cal.image_height_px) if cal else None
         scaled[cam] = scale_pitch_to_video_dims(pitch, dims)
-    per_pair = triangulate_all_pairs(scaled, source=source)
+    per_pair, skipped = triangulate_all_pairs(scaled, source=source)
     flat: list[TriangulatedPoint] = []
     for pts in per_pair.values():
         flat.extend(pts)
     flat.sort(key=lambda p: p.t_rel_s)
-    return flat
+    return flat, skipped
 
 
 def _triangulate_non_current_algorithms(
@@ -359,7 +364,7 @@ def _triangulate_non_current_algorithms(
         if len(alg_pitches) < 2:
             continue
         try:
-            pts = triangulate_all_pairs_for_session(
+            pts, skipped = triangulate_all_pairs_for_session(
                 state, alg_pitches, source="server",
             )
         except Exception as exc:
@@ -367,6 +372,8 @@ def _triangulate_non_current_algorithms(
                 f"{type(exc).__name__}: {exc}"
             )
             continue
+        for ci, cj, reason in skipped:
+            result.abort_reasons[f"missing_calibration:{alg_id}:{ci}-{cj}"] = reason
         # triangulate_all_pairs_for_session already returns t_rel-sorted
         # over the flattened multi-pair list — the invariant downstream
         # consumers (set_active_server_post_algorithm fast path) rely on.
@@ -391,37 +398,17 @@ def session_sync_id_locked(state: "State", session_id: str) -> str | None:
     return None
 
 
-def validate_pair_sync(
-    state: "State", a: PitchPayload, b: PitchPayload
-) -> str | None:
-    """N=2 sync validator preserved as the pair-level primitive (callers
-    that operate on a chosen pair — e.g. the existing fast-path active-
-    pointer flip — still use it). N-cam callers use
-    `validate_session_sync` below, which iterates this primitive across
-    every pair under the same one-sync-id constraint."""
-    if a.sync_anchor_timestamp_s is None or b.sync_anchor_timestamp_s is None:
-        return "no time sync"
-    with state._lock:
-        expected_sync_id = session_sync_id_locked(state, a.session_id)
-    if a.sync_id is None or b.sync_id is None:
-        return "sync id missing"
-    if a.sync_id != b.sync_id:
-        return "sync id mismatch"
-    if expected_sync_id is not None and a.sync_id != expected_sync_id:
-        return "sync id mismatch for armed session"
-    return None
-
-
 def validate_session_sync(
     state: "State", pitches_by_cam: dict[str, PitchPayload],
 ) -> str | None:
     """N-cam sync validator. Every participating cam's pitch must carry
     the same `sync_id`, the same anchor presence, and (if the armed
-    session has a sync_id stamped) match it. Returns the same stable
-    error strings as `validate_pair_sync` so existing callers /
-    SessionResult.error consumers keep working unchanged. Mono session
-    (1 cam) returns None — single cam has no pair to validate against;
-    rebuild collapses mono to no-triangulation regardless."""
+    session has a sync_id stamped) match it. Returns one of the stable
+    error strings (`"no time sync"`, `"sync id missing"`, `"sync id
+    mismatch"`, `"sync id mismatch for armed session"`) so SessionResult.error
+    consumers can pattern-match. Mono session (1 cam) returns None —
+    single cam has no pair to validate against; rebuild collapses mono
+    to no-triangulation regardless."""
     if len(pitches_by_cam) < 2:
         return None
     if any(p.sync_anchor_timestamp_s is None for p in pitches_by_cam.values()):
@@ -467,11 +454,6 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
         session_obj = state._lookup_session_locked(session_id)
         pairing_tuning = state._pairing_tuning
 
-    # Representative (a, b) for helpers that still operate on a chosen
-    # pair — config aggregation, active-server-post pointer resolution.
-    # The triangulation path uses the full pitches_by_cam dict instead.
-    a, b = _representative_pair(pitches_by_cam)
-
     result = empty_result_for_session(
         state,
         session_id,
@@ -514,7 +496,13 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
 
     # Stamp the active server_post pointer early — the path-loop below
     # needs it to know which `triangulated_by_algorithm` bucket to fill.
-    srv_alg = _resolve_server_post_alg_for_result(a, b)
+    # Divergence across cams becomes an explicit abort_reason instead of
+    # silent A-wins (CLAUDE.md no-silent-fallback).
+    try:
+        srv_alg = _resolve_server_post_alg_for_result(pitches_by_cam)
+    except ServerPostPointerMismatchError as exc:
+        result.abort_reasons["server_post_pointer_mismatch"] = str(exc)
+        srv_alg = None
     if srv_alg is not None:
         result.active_server_post_algorithm_id = srv_alg
 
@@ -560,10 +548,23 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             else result.active_server_post_algorithm_id
         )
         if path_alg is None:
-            # server_post path with no resolvable algorithm — this only
-            # fires when no cam has an active pointer, which contradicts
-            # having frames in `frames_server_post`. Skip rather than
-            # mis-file under a guessed bucket.
+            # server_post path with no resolvable algorithm. After the
+            # N-cam upgrade of `_resolve_server_post_alg_for_result`,
+            # this only fires when (a) divergence was caught + recorded
+            # in abort_reasons["server_post_pointer_mismatch"] above,
+            # or (b) no cam has set the pointer at all. Either way the
+            # bucket is unknown — skip rather than mis-file. If frames
+            # exist in (b), that's an internal invariant violation
+            # (writer should always stamp the pointer when populating
+            # frames_server_post); assert to surface it loudly per
+            # CLAUDE.md.
+            assert not frame_counts or (
+                "server_post_pointer_mismatch" in result.abort_reasons
+            ), (
+                f"session {result.session_id}: server_post frames exist "
+                f"but no active_server_post_algorithm_id pointer "
+                f"(frame_counts={frame_counts})"
+            )
             continue
         if frame_counts:
             result.frame_counts_by_algorithm[path_alg] = frame_counts
@@ -578,12 +579,16 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
                 for cam in frame_counts
             }
             try:
-                pts = triangulate_all_pairs_for_session(
+                pts, skipped = triangulate_all_pairs_for_session(
                     state, path_pitches, source="server",
                 )
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
                 continue
+            for ci, cj, reason in skipped:
+                result.abort_reasons[
+                    f"missing_calibration:{path.value}:{ci}-{cj}"
+                ] = reason
             result.triangulated_by_algorithm[path_alg] = pts
             result.algorithms_completed.add(path_alg)
         elif mono_session and frame_counts:
@@ -620,7 +625,10 @@ def rebuild_result_for_session(state: "State", session_id: str) -> SessionResult
             result.aborted = True
         elif len(pitches_by_cam) >= 2:
             result.error = "no detection completed"
-    _stamp_frozen_config_on_result(result, a, b)
+    try:
+        _stamp_frozen_config_on_result(result, pitches_by_cam)
+    except PitchConfigDivergenceError as exc:
+        result.abort_reasons["frozen_config_diverged"] = str(exc)
     stamp_segments_on_result(result, legacy_points_path=legacy_points_path)
     return result
 
@@ -834,7 +842,6 @@ def recompute_result_for_session(
     expected_cams = state.expected_camera_ids()
     with state._lock:
         pitches_by_cam = pitches_by_cam_for_session(state, session_id, expected_cams)
-    a, b = _representative_pair(pitches_by_cam)
 
     result = empty_result_for_session(
         state,
@@ -866,7 +873,12 @@ def recompute_result_for_session(
 
     # Stamp the active server_post pointer up front so the path-loop
     # below can resolve `server_post → algorithm_id` deterministically.
-    srv_alg = _resolve_server_post_alg_for_result(a, b)
+    # Divergence becomes an explicit abort_reason (CLAUDE.md no-silent-fallback).
+    try:
+        srv_alg = _resolve_server_post_alg_for_result(pitches_by_cam)
+    except ServerPostPointerMismatchError as exc:
+        result.abort_reasons["server_post_pointer_mismatch"] = str(exc)
+        srv_alg = None
     if srv_alg is not None:
         result.active_server_post_algorithm_id = srv_alg
 
@@ -886,6 +898,17 @@ def recompute_result_for_session(
                 else result.active_server_post_algorithm_id
             )
             if path_alg is None:
+                # Same invariant as rebuild's path-loop: server_post
+                # frames without a resolvable pointer means divergence
+                # already raised + was caught above. Bucket is unknown
+                # — skip rather than mis-file.
+                assert (
+                    "server_post_pointer_mismatch" in result.abort_reasons
+                ), (
+                    f"session {result.session_id}: server_post frames "
+                    f"in recompute but no active pointer "
+                    f"(frame_counts={frame_counts})"
+                )
                 continue
             result.frame_counts_by_algorithm[path_alg] = frame_counts
             path_pitches = {
@@ -893,12 +916,16 @@ def recompute_result_for_session(
                 for cam in frame_counts
             }
             try:
-                pts = triangulate_all_pairs_for_session(
+                pts, skipped = triangulate_all_pairs_for_session(
                     state, path_pitches, source="server",
                 )
             except Exception as exc:
                 result.abort_reasons[path.value] = f"{type(exc).__name__}: {exc}"
                 continue
+            for ci, cj, reason in skipped:
+                result.abort_reasons[
+                    f"missing_calibration:{path.value}:{ci}-{cj}"
+                ] = reason
             result.triangulated_by_algorithm[path_alg] = pts
             result.algorithms_completed.add(path_alg)
 
@@ -918,12 +945,15 @@ def recompute_result_for_session(
             break
     result.triangulated = authority
 
-    if not result.triangulated and result.error is None and (a is not None or b is not None):
+    if not result.triangulated and result.error is None and pitches_by_cam:
         if result.abort_reasons:
             result.aborted = True
-        elif a is not None and b is not None:
+        elif len(pitches_by_cam) >= 2:
             result.error = "no detection completed"
-    _stamp_frozen_config_on_result(result, a, b)
+    try:
+        _stamp_frozen_config_on_result(result, pitches_by_cam)
+    except PitchConfigDivergenceError as exc:
+        result.abort_reasons["frozen_config_diverged"] = str(exc)
     stamp_segments_on_result(result, legacy_points_path=legacy_points_path)
     return result
 
@@ -942,5 +972,5 @@ __all__ = [
     "session_sync_id_locked",
     "stamp_segments_on_result",
     "triangulate_pair",
-    "validate_pair_sync",
+    "validate_session_sync",
 ]

@@ -24,7 +24,7 @@ migration):
                                       (e.g. "v11_hsv_cc")
     segments                        : authority-path segments (legacy)
     segments_by_algorithm           : {alg_id: [segment dicts]}
-    frame_counts_by_algorithm       : {alg_id: {"A": int, "B": int}}
+    frame_counts_by_algorithm       : {alg_id: {cam_id: int}}  (N-cam)
     active_server_post_algorithm_id : the SVR algo id currently active
     algorithms_completed            : list of alg ids that have data
     gap_threshold_m                 : residual filter cutoff at solve time

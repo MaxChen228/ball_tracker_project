@@ -143,7 +143,8 @@ def test_mono_session_no_triangulation():
 
 def test_n3_with_one_uncalibrated_camera_still_emits_other_pairs():
     """C has no calibration → A|C and B|C drop out (logged in
-    triangulate_all_pairs), A|B keeps emitting. Rebuild must not crash."""
+    triangulate_all_pairs), A|B keeps emitting. Rebuild must not crash.
+    The two dropped pairs are surfaced as explicit abort_reasons."""
     centers = {
         "A": np.array([1.8, -2.5, 1.2]),
         "B": np.array([-1.8, -2.5, 1.2]),
@@ -159,3 +160,118 @@ def test_n3_with_one_uncalibrated_camera_still_emits_other_pairs():
     result = session_results.rebuild_result_for_session(main.state, sid_)
     pair_keys = {tuple(p.pair_key) for p in result.triangulated}
     assert pair_keys == {("A", "B")}, pair_keys
+    # The C-involving pairs are visible, not silently zero-filled.
+    assert "missing_calibration:server_post:A-C" in result.abort_reasons
+    assert "missing_calibration:server_post:B-C" in result.abort_reasons
+
+
+# ---------------------------------------------------------------------------
+# Phase A: silent-fallback elimination at the N-cam boundary. Each of the
+# following used to silently degrade (drop C's pointer / config, or mask
+# an all-uncalibrated session as a generic "no detection"). They must now
+# surface an explicit signal instead.
+# ---------------------------------------------------------------------------
+
+def _snap(alg_id: str, h_min: int):
+    """server_post_config_used snapshot whose params vary by `h_min` so
+    two cams can be made to diverge."""
+    from schemas import DetectionConfigSnapshotPayload
+    return DetectionConfigSnapshotPayload(
+        algorithm_id=alg_id,
+        params={
+            "hsv": {"h_min": h_min, "h_max": 20, "s_min": 30,
+                    "s_max": 200, "v_min": 40, "v_max": 210},
+            "shape_gate": {"aspect_min": 0.7, "fill_min": 0.55},
+        },
+        preset_name=None,
+    )
+
+
+def test_n3_server_post_pointer_mismatch_records_abort_reason():
+    """A=B=v11 but C points at a different alg → no silent A-wins pick.
+    The divergence is recorded explicitly so the operator sees it."""
+    centers = {
+        "A": np.array([1.8, -2.5, 1.2]),
+        "B": np.array([-1.8, -2.5, 1.2]),
+        "C": np.array([0.0, -3.0, 2.4]),
+    }
+    pitches, _ = _scene(centers)
+    pitches["C"] = pitches["C"].model_copy(update={
+        "active_server_post_algorithm_id": "v12_other",
+    })
+    _ingest(pitches)
+    sid_ = next(iter(pitches.values())).session_id
+    result = session_results.rebuild_result_for_session(main.state, sid_)
+
+    assert "server_post_pointer_mismatch" in result.abort_reasons
+    msg = result.abort_reasons["server_post_pointer_mismatch"]
+    assert "v12_other" in msg and "v11_hsv_cc" in msg
+
+
+def test_n3_frozen_config_divergence_records_abort_reason():
+    """A=B share one frozen server_post_config_used snapshot, C carries a
+    different one → aggregate must raise → recorded as abort_reason rather
+    than silently picking A's snapshot."""
+    centers = {
+        "A": np.array([1.8, -2.5, 1.2]),
+        "B": np.array([-1.8, -2.5, 1.2]),
+        "C": np.array([0.0, -3.0, 2.4]),
+    }
+    pitches, _ = _scene(centers)
+    # server_post_config_used is a computed view of
+    # config_used_by_algorithm[active pointer], so seed the dict directly.
+    pitches["A"] = pitches["A"].model_copy(update={
+        "config_used_by_algorithm": {"v11_hsv_cc": _snap("v11_hsv_cc", 10)}})
+    pitches["B"] = pitches["B"].model_copy(update={
+        "config_used_by_algorithm": {"v11_hsv_cc": _snap("v11_hsv_cc", 10)}})
+    pitches["C"] = pitches["C"].model_copy(update={
+        "config_used_by_algorithm": {"v11_hsv_cc": _snap("v11_hsv_cc", 15)}})
+    _ingest(pitches)
+    sid_ = next(iter(pitches.values())).session_id
+    result = session_results.rebuild_result_for_session(main.state, sid_)
+
+    assert "frozen_config_diverged" in result.abort_reasons
+
+
+def test_n3_divergent_sync_id_surfaces_error():
+    """C carries a sync_id distinct from A/B → validate_session_sync (now
+    N-cam) sees all three cams and rejects the session, where the old
+    pair-only validator would have passed on A==B alone."""
+    centers = {
+        "A": np.array([1.8, -2.5, 1.2]),
+        "B": np.array([-1.8, -2.5, 1.2]),
+        "C": np.array([0.0, -3.0, 2.4]),
+    }
+    pitches, _ = _scene(centers)
+    pitches["C"] = pitches["C"].model_copy(update={"sync_id": "sy_different"})
+    _ingest(pitches)
+    sid_ = next(iter(pitches.values())).session_id
+    result = session_results.rebuild_result_for_session(main.state, sid_)
+
+    assert result.error == "sync id mismatch"
+    assert result.triangulated == []
+
+
+def test_n3_all_uncalibrated_records_missing_calibration():
+    """Every cam lacks calibration → all pairs skip. The result must carry
+    explicit missing_calibration abort_reasons (and aborted=True), not the
+    generic 'no detection completed' that masks the real cause."""
+    centers = {
+        "A": np.array([1.8, -2.5, 1.2]),
+        "B": np.array([-1.8, -2.5, 1.2]),
+        "C": np.array([0.0, -3.0, 2.4]),
+    }
+    pitches, _ = _scene(centers)
+    for cam in list(pitches):
+        pitches[cam] = pitches[cam].model_copy(update={
+            "intrinsics": None, "homography": None,
+        })
+    _ingest(pitches)
+    sid_ = next(iter(pitches.values())).session_id
+    result = session_results.rebuild_result_for_session(main.state, sid_)
+
+    assert result.triangulated == []
+    missing = [k for k in result.abort_reasons if k.startswith("missing_calibration:")]
+    assert len(missing) == 3, result.abort_reasons
+    assert result.aborted is True
+    assert result.error is None

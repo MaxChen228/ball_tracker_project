@@ -105,7 +105,9 @@ class _FakeTriangulatePair:
         })
         if alg_marker in self.raise_for:
             raise RuntimeError(f"forced failure for marker={alg_marker}")
-        # Deterministic single-point result keyed off the marker.
+        # Deterministic single-point result keyed off the marker. Second
+        # tuple element is the skipped-pairs list (empty — fake never
+        # simulates uncalibrated cams).
         from schemas import TriangulatedPoint
         return [
             TriangulatedPoint(
@@ -113,7 +115,7 @@ class _FakeTriangulatePair:
                 residual_m=0.01, cost_a=0.0, cost_b=0.0,
                 pair_key=("A","B"),
             ),
-        ]
+        ], []
 
 
 def test_helper_accumulates_non_current_algorithms(monkeypatch):

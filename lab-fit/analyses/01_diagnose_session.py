@@ -48,17 +48,34 @@ def diagnose(sid: str, out_dir: Path) -> None:
     _sub("A. Top-line counts")
     from data_loader import algorithm_id_for_path
     # Re-project current `*_by_algorithm` schema into a path-keyed view
-    # so downstream code keeps reading "live"/"server_post" tags.
-    _alg = lambda p: algorithm_id_for_path(result, p) or ""
+    # so downstream code keeps reading "live"/"server_post" tags. `_alg`
+    # returns None when a path has no algorithm registered — kept explicit
+    # (no `or ""` collapse) so a missing algorithm reads differently from
+    # "registered but zero frames" in the diagnostic output.
+    _alg = lambda p: algorithm_id_for_path(result, p)
     fc_alg = result.get("frame_counts_by_algorithm", {})
     tbp_alg = result.get("triangulated_by_algorithm", {})
     sbp_alg = result.get("segments_by_algorithm", {})
-    fc = {p: fc_alg.get(_alg(p), {}) for p in ("live", "server_post")}
-    tbp = {p: tbp_alg.get(_alg(p), []) for p in ("live", "server_post")}
-    sbp = {p: sbp_alg.get(_alg(p), []) for p in ("live", "server_post")}
+
+    def _by_path(by_alg, default):
+        out = {}
+        for p in ("live", "server_post"):
+            alg = _alg(p)
+            out[p] = default if alg is None else by_alg.get(alg, default)
+        return out
+
+    fc = _by_path(fc_alg, {})
+    tbp = _by_path(tbp_alg, [])
+    sbp = _by_path(sbp_alg, [])
     print("frame_counts (raw candidate-bearing frames per camera):")
     for path, by_cam in fc.items():
-        print(f"  {path:12s}: A={by_cam.get('A', 0):5d}  B={by_cam.get('B', 0):5d}")
+        if _alg(path) is None:
+            print(f"  {path:12s}: <no algorithm registered>")
+        elif by_cam:
+            per_cam = "  ".join(f"{c}={by_cam[c]:5d}" for c in sorted(by_cam))
+            print(f"  {path:12s}: {per_cam}")
+        else:
+            print(f"  {path:12s}: (no frames)")
     print("triangulated:")
     for path, pts in tbp.items():
         print(f"  {path:12s}: {len(pts):5d} points")

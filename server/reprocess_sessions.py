@@ -274,7 +274,8 @@ def triangulate_session(
         cameras_received={"A": a is not None, "B": b is not None},
         gap_threshold_m=pairing_tuning.gap_threshold_m,
     )
-    used = session_results.aggregate_pitch_used_configs(a, b, sid)
+    pitches_by_cam = {cam: p for cam, p in pitches.items() if p is not None}
+    used = session_results.aggregate_pitch_used_configs(pitches_by_cam, sid)
     live_snap = used["live_config_used"]
     if live_snap is not None:
         result.config_used_by_algorithm[algorithms.IOS_CAPTURE_TIME] = live_snap

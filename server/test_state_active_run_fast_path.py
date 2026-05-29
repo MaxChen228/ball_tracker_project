@@ -64,10 +64,10 @@ class _FakeTriangulatePair:
     def __call__(self, state, pitches_by_cam, *, source: str = "server"):
         any_pitch = next(iter(pitches_by_cam.values()))
         if not any_pitch.frames_server_post:
-            return []
+            return [], []
         marker = any_pitch.frames_server_post[0].frame_index
         self.calls.append(marker)
-        return [
+        pts = [
             TriangulatedPoint(
                 t_rel_s=float(i) * 0.1,
                 x_m=float(marker), y_m=0.0, z_m=0.0,
@@ -76,6 +76,7 @@ class _FakeTriangulatePair:
             )
             for i in range(2)
         ]
+        return pts, []
 
 
 def _register_fake_v12(monkeypatch) -> None:
@@ -239,7 +240,7 @@ def test_mono_session_falls_back_to_rebuild(monkeypatch, tmp_path):
 
 
 def test_sync_error_falls_back_to_rebuild(monkeypatch, tmp_path):
-    """Mismatched `sync_id` between A and B trips `validate_pair_sync`.
+    """Mismatched `sync_id` between A and B trips `validate_session_sync`.
     Fast path skips this case (cached bucket points were computed
     pre-sync-break and may not reflect the current pair-rejection
     semantics); rebuild surfaces `result.error`."""
