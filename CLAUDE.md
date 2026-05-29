@@ -79,6 +79,14 @@ iOS = server lockstep 部署，沒有多版本 client、沒有歷史資料保鮮
 
 ## Git / PR workflow
 
+**pre-push gate（雙人協作，clone 後跑一次）**：
+`git config core.hooksPath scripts/hooks`。`scripts/hooks/pre-push`
+依本次 push 改動智慧跑：`server/*.py` 改 → pytest；`*.swift` 改 →
+`xcodebuild build-for-testing`（編譯 test target，補 simulator `build`
+漏編 test 的洞）。繞過：`git push --no-verify`（全跳）或
+`BALL_TRACKER_SKIP_IOS=1`（只跳慢的 iOS build）。目的：`main` 永遠保持
+綠，不讓紅 CI 污染另一位協作者的基底。
+
 **merge PR 後立刻 pull main**：`gh pr merge` 成功後同一輪工具呼叫鏈加
 `git checkout main && git pull origin main`，不管 squash/merge/rebase。
 不 pull 會基於過時 main 做後續判斷。
