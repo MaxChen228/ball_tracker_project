@@ -1,14 +1,27 @@
 """Reference sync chirp for 時間校正 — extracted from main.py.
 
-The signal is a **dual chirp**: up-sweep 2→8 kHz (100 ms, Hann) followed by
-50 ms of silence, then a down-sweep 8→2 kHz (100 ms, Hann). The detector on
-each phone locates both sweeps independently and averages their centers to
-produce a Doppler-free anchor, and uses the 150 ms center-to-center gap as a
-consistency check against stray same-band transients.
+Mutual sync uses **two disjoint single bands**, one per phone: each phone
+emits a single 100 ms up-sweep Hann chirp in its own band (A = 2→4 kHz,
+B = 5→7 kHz, 1 kHz guard between them — see `SYNC_BAND_*` below). The
+detector on each phone matched-filters both bands off its own mic stream to
+recover self/other arrival times. Quick sync reuses band A alone (one
+physical chirp, every listener finds it). Robustness comes from emitting N
+bursts per band and taking the median arrival across bursts (see
+`detect_band_windowed` + `_median_band_detection` in `sync_audio_detect.py`).
 
-If you change any of the timing constants here (durations, gap, frequencies),
-update the matching defaults in `AudioChirpDetector.init(...)` on the iOS
-side so the detector expects the same inter-chirp gap.
+If you change any of the timing constants here (durations, frequencies),
+update the matching defaults in `AudioSyncDetector.swift` on the iOS side so
+the detector expects the same bands.
+
+NOTE — two distinct waveforms live in this module, do not conflate them:
+- The `SYNC_BAND_*` constants + `_hann_chirp` above drive the **band-based
+  mutual / quick sync** detection path (per-band single sweeps, matched-
+  filtered on-device).
+- `chirp_wav_bytes()` below is the **legacy `/chirp.wav` playback waveform**
+  (a 2→8 kHz up+down dual sweep, 150 ms center-to-center) served to a third
+  speaker via `GET /chirp.wav`. It is independent of the band detector and
+  its constants are local to that function — changing `SYNC_BAND_*` does NOT
+  change it, and vice versa.
 """
 
 from __future__ import annotations

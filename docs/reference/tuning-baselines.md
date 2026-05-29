@@ -18,7 +18,7 @@ theory.
 
 ## HSV — OpenCV 0-179 hue space
 
-Live config (`data/detection_config.json`) `blue_ball-pure` values:
+Live config (`data/detection_config.json`) `blue_ball` values:
 
 | field   | value        |
 |---------|--------------|
@@ -66,7 +66,7 @@ Combined mask `hsv_mask AND fg_mask`. Empirical: **0.63 – 0.70**, median
 perfect circle fill = π/4 ≈ 0.785; ball-side shadow + seams + HSV edge
 failures bite 10–15%.
 
-- `_MIN_FILL = 0.55` in code. Empirical lower edge 0.63 → margin OK.
+- `_MIN_FILL = 0.55` in code (`server/detection.py:98`). Empirical lower edge 0.63 → margin OK.
 - **Do not** use morphology CLOSE to push fill up to 0.7+ — that masks
   calibration problems with complexity.
 - Selector cost uses 0.68 as the fill-penalty target
@@ -78,7 +78,7 @@ failures bite 10–15%.
 At 240 fps a flying ball is near-perfect circular (mild ellipse + boundary
 curvature at most).
 
-- Current `_MIN_ASPECT = 0.70` (`server/detection.py:106`).
+- Current `_MIN_ASPECT = 0.70` (`server/detection.py:86`).
 - 0.75 is plausibly fine, but **quantify before bumping** (backlog).
 - If switching to `4πA/P²` circularity → start at ≥ 0.8.
 - Do **not** loosen to swallow motion blur — blur is not this game's

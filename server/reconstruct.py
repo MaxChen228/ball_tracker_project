@@ -209,8 +209,14 @@ def _rays_and_trace_for_source(
         # the per-algorithm cost gate in playback (and so the operator
         # can SEE every blob the detector saw, not only the winner).
         # When candidates is empty we fall back to a single ray from
-        # f.px/f.py — covers legacy JSONs persisted before candidate-
-        # stamping landed.
+        # f.px/f.py. Unlike pairing.py (which triangulates and so must
+        # reject unscored candidates), this is viz-only: monocular
+        # paths that ship px/py without a candidate list (e.g.
+        # `ios_capture_time`) must still render one ray so the operator
+        # can see the detection — see
+        # test_post_pitch_anchorless_single_camera_keeps_rays. The ray
+        # carries cost=None and the viewer's `_candPassesThreshold`
+        # admits it (no cost gate on legacy/unscored rays).
         cand_iter: list[tuple[int, float, float, float | None]]
         if f.candidates:
             cand_iter = [

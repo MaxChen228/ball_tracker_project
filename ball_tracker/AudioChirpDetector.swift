@@ -79,7 +79,14 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
     let deliveryQueue = DispatchQueue(label: "audio.chirp.queue")
 
     /// Fired on `deliveryQueue` when a valid up+down pair is detected.
-    var onChirpDetected: ((ChirpEvent) -> Void)?
+    /// Backing storage is confined to `deliveryQueue` (the queue that fires
+    /// it); external writers (main queue) bounce through the computed
+    /// accessors below to avoid tearing the 2-word closure value.
+    private var _onChirpDetected: ((ChirpEvent) -> Void)?
+    var onChirpDetected: ((ChirpEvent) -> Void)? {
+        get { deliveryQueue.sync { _onChirpDetected } }
+        set { deliveryQueue.async { [weak self] in self?._onChirpDetected = newValue } }
+    }
 
     // Config.
     /// Current sample rate the references + ring are built against. Starts at
@@ -560,7 +567,9 @@ final class AudioChirpDetector: NSObject, AVCaptureAudioDataOutputSampleBufferDe
                 pendingUp = nil
                 triggered = true
                 log.info("chirp pair detected up_peak=\(pu.peak, privacy: .public) down_peak=\(downResult.bestNorm, privacy: .public) down_psr=\(downPSR, privacy: .public) cfar_up_floor=\(self.cfarUp.estimate, privacy: .public) cfar_down_floor=\(self.cfarDown.estimate, privacy: .public) cfar_k=\(self.cfarNoiseMultiplier, privacy: .public) gap_s=\(gap, privacy: .public) anchor_s=\(anchorS, privacy: .public)")
-                onChirpDetected?(
+                // Already on deliveryQueue — read backing var directly to
+                // avoid re-entrant `deliveryQueue.sync` deadlock in the getter.
+                _onChirpDetected?(
                     ChirpEvent(anchorFrameIndex: 0, anchorTimestampS: anchorS)
                 )
             } else {

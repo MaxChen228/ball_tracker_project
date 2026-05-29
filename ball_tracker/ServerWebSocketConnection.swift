@@ -41,7 +41,7 @@ final class ServerWebSocketConnection {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _state }
         set { stateLock.lock(); _state = newValue; stateLock.unlock() }
     }
-    private(set) var reconnectAttempt: Int = 0
+    private var reconnectAttempt: Int = 0
 
     // MARK: Configuration
 

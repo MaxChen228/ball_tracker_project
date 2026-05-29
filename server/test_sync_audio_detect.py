@@ -251,3 +251,43 @@ def test_trace_emitted_at_30hz() -> None:
     # Trace times should be strictly increasing.
     times = [s.t for s in result.trace]
     assert all(t2 > t1 for t1, t2 in zip(times, times[1:]))
+
+
+def test_median_band_detection_one_strong_two_weak_stays_honest() -> None:
+    """BLOCK#s1 regression: a single clean burst must NOT drag a mostly-noise
+    band over the floor, and out-of-window fabricated centers must NOT pollute
+    the timestamp. Aggregate peak is the MEDIAN (honest weak), and the center
+    is taken only over floor-cleared bursts.
+
+    With 1 strong (peak 0.8 @ t=10.0) + 2 weak/fabricated (peak 0.05 @ t=98/99):
+      - median peak = 0.05 (sub-floor, honest) — the OLD mean was
+        (0.8+0.05+0.05)/3 = 0.30, which would have masqueraded as a pass.
+      - center = median over the strong subset = 10.0, NOT dragged toward the
+        fabricated 98/99 positions.
+    """
+    threshold = 0.18
+    dets = [
+        sync_audio_detect.BandDetection(center_pts_s=10.0, peak_norm=0.8, psr=5.0),
+        sync_audio_detect.BandDetection(center_pts_s=99.0, peak_norm=0.05, psr=0.1),
+        sync_audio_detect.BandDetection(center_pts_s=98.0, peak_norm=0.05, psr=0.1),
+    ]
+    out = sync_audio_detect._median_band_detection(dets, threshold)
+    assert out.center_pts_s == 10.0          # strong-only center, not 98/99
+    assert out.peak_norm == 0.05             # median (honest), not mean 0.30
+    assert out.peak_norm < threshold         # gate would correctly reject
+
+
+def test_median_band_detection_all_weak_falls_back_but_stays_sub_floor() -> None:
+    """When NO burst clears the floor, center falls back to all bursts, but the
+    median peak is still sub-floor — so the caller's gate sees an honest weak
+    signal rather than an invented pass."""
+    threshold = 0.18
+    dets = [
+        sync_audio_detect.BandDetection(center_pts_s=1.0, peak_norm=0.05, psr=0.1),
+        sync_audio_detect.BandDetection(center_pts_s=2.0, peak_norm=0.06, psr=0.1),
+        sync_audio_detect.BandDetection(center_pts_s=3.0, peak_norm=0.04, psr=0.1),
+    ]
+    out = sync_audio_detect._median_band_detection(dets, threshold)
+    assert out.center_pts_s == 2.0           # median over all (no strong subset)
+    assert out.peak_norm == 0.05             # median peak, sub-floor
+    assert out.peak_norm < threshold         # gate sees honest weak signal

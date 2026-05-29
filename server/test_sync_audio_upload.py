@@ -142,7 +142,9 @@ def test_audio_upload_a_only_marks_run_pending() -> None:
     assert body["detection"]["peak_self"] > 0.6
     assert body["detection"]["peak_other"] > 0.6
     assert body["detection"]["n_burst"] == 3
-    assert body["detection"]["windowed"] is True
+    # All 3 clean bursts per band clear the floor and feed the median.
+    assert body["detection"]["strong_self"] == 3
+    assert body["detection"]["strong_other"] == 3
 
 
 def test_audio_upload_both_roles_solves_via_state_machine() -> None:

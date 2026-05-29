@@ -53,9 +53,26 @@ class IntrinsicsPayload(BaseModel):
     fy: float
     cx: float
     cy: float
-    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3]. Optional so
-    # payloads without distortion still validate; server detection still
-    # runs, just without lens distortion correction in triangulation.
+    # OpenCV 5-coefficient distortion [k1, k2, p1, p2, k3].
+    #
+    # `None` is reserved for ONE legitimate producer: the internal
+    # FOV-pinhole approximation path (`calibration_auto._derive_auto_cal_
+    # intrinsics` source="fov"), which has no lens model by construction.
+    # The only LIVE iOS wire entry that carries distortion is the ChArUco
+    # upload (`POST /calibration/intrinsics/{device_id}`,
+    # IntrinsicsPendingCache.swift / ServerUploader.swift), which always
+    # ships the full 5-vector and is rejected with 422 if `None` arrives
+    # (`routes/calibration_intrinsics._validate_intrinsics_payload`) — a
+    # `None` there is a wire regression, NOT a pinhole calibration, and must
+    # not silently degrade triangulation to zero distortion at frame edges
+    # (CLAUDE.md no-silent-fallback). NOTE: the `CalibrationSnapshot` and
+    # `PitchPayload` models also embed IntrinsicsPayload, but the current
+    # lockstep iOS build sends intrinsics on NEITHER (PitchPayload dropped
+    # intrinsics — ServerWireSchemas.swift; no iOS POST /calibration sender),
+    # so they are not live wire surfaces and carry no 422 guard. If iOS ever
+    # restores either path, add the same reject there. The field stays
+    # `| None` only because this model is reused for the FOV path; do not
+    # read `None` as "validated pinhole" anywhere downstream.
     distortion: list[float] | None = None
 
 
