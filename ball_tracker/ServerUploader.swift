@@ -447,6 +447,99 @@ final class ServerUploader: @unchecked Sendable {
         task.resume()
     }
 
+    /// Metadata ferried alongside a quick-sync WAV to
+    /// `/sync/quick_audio_upload`. Identical for emitter and listeners —
+    /// the server knows from the run which cam is the emitter, so there's
+    /// no `role` and no `emission_pts_s` (the zero point is the emitter's
+    /// self-hear, recovered server-side, not a device-reported emission).
+    struct QuickSyncUploadMeta: Encodable {
+        let sync_id: String
+        let camera_id: String
+        /// Host-clock seconds of the first recorded sample — the server maps
+        /// its detected chirp sample offset back to this cam's session clock.
+        let audio_start_pts_s: Double
+    }
+
+    /// Ship one quick-sync listening window to the server for band-A
+    /// detection. Same multipart shape as `uploadSyncAudio` (payload JSON +
+    /// audio WAV), different endpoint + meta.
+    func uploadQuickSyncAudio(
+        meta: QuickSyncUploadMeta,
+        wavData: Data,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        guard let base = config.baseURL() else {
+            completion?(.failure(NSError(
+                domain: "ServerUploader",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"]
+            )))
+            return
+        }
+        let url = base.appendingPathComponent("sync/quick_audio_upload")
+
+        let metaData: Data
+        do {
+            metaData = try JSONEncoder().encode(meta)
+        } catch {
+            completion?(.failure(error))
+            return
+        }
+
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+
+        var body = Data()
+        func appendLine(_ s: String) {
+            if let d = (s + "\r\n").data(using: .utf8) { body.append(d) }
+        }
+        appendLine("--\(boundary)")
+        appendLine("Content-Disposition: form-data; name=\"payload\"")
+        appendLine("Content-Type: application/json")
+        appendLine("")
+        body.append(metaData)
+        appendLine("")
+        appendLine("--\(boundary)")
+        appendLine(
+            "Content-Disposition: form-data; name=\"audio\"; "
+            + "filename=\"\(meta.sync_id)_\(meta.camera_id).wav\""
+        )
+        appendLine("Content-Type: audio/wav")
+        appendLine("")
+        body.append(wavData)
+        appendLine("")
+        appendLine("--\(boundary)--")
+
+        request.httpBody = body
+        let syncId = meta.sync_id
+        let camId = meta.camera_id
+        let wavBytes = wavData.count
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                log.error("quick-sync audio upload failed sync=\(syncId, privacy: .public) cam=\(camId, privacy: .public) bytes=\(wavBytes) err=\(error.localizedDescription, privacy: .public)")
+                completion?(.failure(error))
+                return
+            }
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                log.error("quick-sync audio upload rejected sync=\(syncId, privacy: .public) cam=\(camId, privacy: .public) http=\(http.statusCode)")
+                completion?(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: http.statusCode,
+                    userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
+                )))
+                return
+            }
+            log.info("quick-sync audio upload ok sync=\(syncId, privacy: .public) cam=\(camId, privacy: .public) bytes=\(wavBytes)")
+            completion?(.success(()))
+        }
+        task.resume()
+    }
+
     /// Push one diagnostic line to the server's mutual-sync log ring.
     /// Fire-and-forget — failures are logged locally via `log.error` but
     /// never surface to the caller, because a dropped log line must not
