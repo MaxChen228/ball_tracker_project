@@ -21,6 +21,7 @@ final class CameraCommandRouterTests: XCTestCase {
         var captureHeight: Int = 1080
         var previewRequested: Bool = false
         var calCaptureState: CalCaptureState = .idle
+        var intrinsicsCalibrationActive: Bool = false
         var armCalibrationCaptureResult: Bool = true
         private(set) var armCalibrationCaptureCount = 0
 
@@ -125,6 +126,9 @@ final class CameraCommandRouterTests: XCTestCase {
                 },
                 getCalCaptureState: {
                     self.guarded { self.calCaptureState }
+                },
+                getIntrinsicsCalibrationActive: {
+                    self.guarded { self.intrinsicsCalibrationActive }
                 },
                 armCalibrationCapture: {
                     self.guarded {
