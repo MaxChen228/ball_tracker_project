@@ -46,6 +46,22 @@ def _make_wav(chirp_offset_s: float) -> bytes:
     return buf.getvalue()
 
 
+def _make_noise_wav() -> bytes:
+    """Recording with NO chirp — pure faint mic noise. Mimics a phone that
+    never heard the emitter (too far / mic occluded / silent switch)."""
+    n = int(SAMPLE_RATE * DURATION_S)
+    rng = np.random.default_rng(31)
+    audio = rng.normal(0.0, 0.01, size=n).astype(np.float32)
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
 def _upload(client: TestClient, sync_id: str, cam: str, audio_start_pts_s: float,
             chirp_offset_s: float):
     meta = {"sync_id": sync_id, "camera_id": cam,
@@ -54,6 +70,17 @@ def _upload(client: TestClient, sync_id: str, cam: str, audio_start_pts_s: float
         "/sync/quick_audio_upload",
         data={"payload": json.dumps(meta)},
         files={"audio": ("rec.wav", _make_wav(chirp_offset_s), "audio/wav")},
+    )
+
+
+def _upload_noise(client: TestClient, sync_id: str, cam: str,
+                  audio_start_pts_s: float):
+    meta = {"sync_id": sync_id, "camera_id": cam,
+            "audio_start_pts_s": audio_start_pts_s}
+    return client.post(
+        "/sync/quick_audio_upload",
+        data={"payload": json.dumps(meta)},
+        files={"audio": ("rec.wav", _make_noise_wav(), "audio/wav")},
     )
 
 
@@ -96,6 +123,54 @@ def test_full_n2_round_trip():
     # B chirp shifted +5ms → B anchor is 5ms larger → delta ≈ +0.005.
     assert abs(result["deltas_s"]["B"] - 0.005) < 1e-3
     assert result["missing_cam_ids"] == []
+
+
+def test_listener_noise_lands_in_missing_not_fake_anchor():
+    """B uploads pure noise (never heard the chirp). It must NOT silently
+    contribute a fake anchor argmax'd off noise — B lands in
+    `missing_cam_ids`, the run still solves on A's self-hear zero point."""
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
+    r = client.post("/sync/quick_start", json={"emitter_cam_id": "A"})
+    assert r.status_code == 200, r.text
+    sync_id = r.json()["quick_sync"]["id"]
+
+    ra = _upload(client, sync_id, "A", audio_start_pts_s=100.0, chirp_offset_s=0.0)
+    assert ra.status_code == 200, ra.text
+    assert ra.json()["solved"] is False
+
+    rb = _upload_noise(client, sync_id, "B", audio_start_pts_s=100.0)
+    assert rb.status_code == 200, rb.text
+    body = rb.json()
+    # B's own detection block exposes the sub-floor peak honestly.
+    assert body["detection"]["peak"] < 0.18
+    assert body["solved"] is True
+    result = body["result"]
+    assert result["aborted"] is False
+    assert "B" not in result["deltas_s"]
+    assert result["missing_cam_ids"] == ["B"]
+
+
+def test_emitter_noise_aborts_whole_run():
+    """If the EMITTER itself recorded only noise there is no zero point —
+    the whole run aborts (weak_detection), not a fake anchor for everyone."""
+    client = TestClient(app)
+    main.state.heartbeat("A")
+    main.state.heartbeat("B")
+    r = client.post("/sync/quick_start", json={"emitter_cam_id": "A"})
+    assert r.status_code == 200, r.text
+    sync_id = r.json()["quick_sync"]["id"]
+
+    ra = _upload_noise(client, sync_id, "A", audio_start_pts_s=100.0)
+    assert ra.status_code == 200, ra.text
+    assert ra.json()["detection"]["peak"] < 0.18
+
+    rb = _upload(client, sync_id, "B", audio_start_pts_s=100.0, chirp_offset_s=0.005)
+    assert rb.status_code == 200, rb.text
+    result = rb.json()["result"]
+    assert result["aborted"] is True
+    assert result["abort_reasons"]["A"] == "weak_detection"
 
 
 def test_upload_without_active_run_409():

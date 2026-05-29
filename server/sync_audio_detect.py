@@ -271,10 +271,17 @@ def detect_sync_report(
     PSR values even when the report itself reflects abort logic, so
     failure-mode post-mortem can see the real numbers.
 
-    Currently `aborted` is False in all success paths — we always
-    produce both timestamps since server-side detection runs over the
-    whole recording. If the peak fails a caller-supplied threshold
-    (future hook), we flip aborted=True and null the relevant PTS.
+    `peak_threshold` is the normalized matched-filter peak floor (the
+    operator-tuned `chirp_detect_threshold`, 0–1). A band whose aggregate
+    peak falls below it never produced a real chirp arrival — we null
+    that band's timestamp and flag `aborted=True` / `weak_detection`
+    instead of returning the argmax of noise. The mutual solver already
+    routes any null timestamp through `_build_aborted_result_locked`, so
+    nulling here is all that's needed to engage the abort path. Peak — not
+    PSR — is the discriminator: the windowed normalized correlation clips
+    at 1.0, so a clean chirp's in-window PSR collapses to ~1.0 (same as
+    noise) and PSR carries no signal here; peak cleanly separates clean
+    (~1.0) from noise (~0.06).
     """
     if role not in ("A", "B"):
         raise ValueError(f"role must be 'A' or 'B', got {role!r}")
@@ -305,17 +312,21 @@ def detect_sync_report(
     psr_self = det_self.psr
     psr_other = det_other.psr
 
+    weak_self = peak_self < peak_threshold
+    weak_other = peak_other < peak_threshold
+    aborted = weak_self or weak_other
+
     report = SyncReport(
         camera_id=camera_id,
         sync_id=sync_id,
         role=role,  # type: ignore[arg-type]
-        t_self_s=float(t_self_s),
-        t_from_other_s=float(t_from_other_s),
+        t_self_s=None if weak_self else float(t_self_s),
+        t_from_other_s=None if weak_other else float(t_from_other_s),
         emitted_band=role,  # type: ignore[arg-type]
         trace_self=trace_self,
         trace_other=trace_other,
-        aborted=False,
-        abort_reason=None,
+        aborted=aborted,
+        abort_reason="weak_detection" if aborted else None,
     )
     debug = {
         "sample_rate": float(sample_rate),
@@ -324,6 +335,7 @@ def detect_sync_report(
         "peak_other": float(peak_other),
         "psr_self": float(psr_self),
         "psr_other": float(psr_other),
+        "peak_threshold": float(peak_threshold),
         "n_burst": n_burst,
         # How many of the N bursts per band cleared `peak_threshold` and thus
         # contributed to the median timestamp. Low counts (vs n_burst) mean
@@ -351,6 +363,16 @@ def detect_quick_sync_report(
     physical chirp and one band to find. We reuse the windowed multi-burst
     detector + median combine for robustness against a single bad burst.
 
+    `peak_threshold` is the normalized matched-filter peak floor (the
+    operator-tuned `chirp_detect_threshold`, 0–1). When the aggregate peak
+    is below it the phone never actually heard the chirp — we return a null
+    anchor + `aborted=True` / `weak_detection` rather than the argmax of
+    noise. The quick solver maps a null anchor to `missing_cam_ids` for a
+    listener, or aborts the whole run if it's the emitter (no zero point).
+    Peak — not PSR — is the discriminator (windowed correlation clips at
+    1.0 → clean PSR collapses to ~1.0, same as noise; peak separates clean
+    ~1.0 from noise ~0.06).
+
     Returns `(report, debug)`. `debug` carries the raw peak / PSR so a
     weak-detection post-mortem can see the real numbers even when the
     report is a clean success.
@@ -367,12 +389,13 @@ def detect_quick_sync_report(
     )
     det = _median_band_detection(dets, peak_threshold)
 
+    weak = det.peak_norm < peak_threshold
     report = QuickSyncReport(
         camera_id=camera_id,
         sync_id=sync_id,
-        anchor_pts_s=float(det.center_pts_s),
-        aborted=False,
-        abort_reason=None,
+        anchor_pts_s=None if weak else float(det.center_pts_s),
+        aborted=weak,
+        abort_reason="weak_detection" if weak else None,
         trace=det.trace,
     )
     debug = {
@@ -380,6 +403,7 @@ def detect_quick_sync_report(
         "duration_s": float(len(audio)) / float(sample_rate),
         "peak": float(det.peak_norm),
         "psr": float(det.psr),
+        "peak_threshold": float(peak_threshold),
         "n_burst": len(emit_at_s),
         # Bursts that cleared `peak_threshold` and contributed to the median
         # anchor; low vs n_burst flags a weak detection (see detect_sync_report).

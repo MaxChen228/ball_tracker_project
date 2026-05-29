@@ -136,6 +136,7 @@ async def sync_quick_audio_upload(
             wav_bytes=wav_bytes, sync_id=sync_id, camera_id=camera_id,
             audio_start_pts_s=audio_start_pts_s,
             emit_at_s=params.emit_a_at_s,
+            peak_threshold=state.chirp_detect_threshold(),
             search_window_s=params.search_window_s,
         )
     except Exception as e:
@@ -291,6 +292,7 @@ async def sync_audio_upload(
             wav_bytes=wav_bytes, sync_id=sync_id, camera_id=camera_id,
             role=role, audio_start_pts_s=audio_start_pts_s,
             emit_at_s_self=emit_at_self, emit_at_s_other=emit_at_other,
+            peak_threshold=state.chirp_detect_threshold(),
             search_window_s=params.search_window_s,
         )
     except Exception as e:
