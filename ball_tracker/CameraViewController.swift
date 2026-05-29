@@ -763,6 +763,9 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         overlayView.onIPTapped = { [weak self] in
             self?.showIPEditAlert()
         }
+        overlayView.onCalibrateTapped = { [weak self] in
+            self?.presentIntrinsicsCalibration()
+        }
         statusPresenter = CameraStatusPresenter(
             topStatusChip: overlayView.topStatusChip,
             warningLabel: overlayView.warningLabel,
@@ -792,6 +795,40 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             self.applyUpdatedSettings()
         })
         present(alert, animated: true)
+    }
+
+    /// Hand off the back camera to the ChArUco intrinsics flow.
+    /// AVCaptureSession ownership swap: pause runtime first, set the
+    /// command-router gate flag, present modal. On dismiss reverse the
+    /// order. If the upload succeeded, fire a delayed `/calibration/auto/{cam}`
+    /// so the dashboard auto-cal picks up the fresh ChArUco K without
+    /// the operator having to click it manually.
+    private func presentIntrinsicsCalibration() {
+        let role = overlayView.selectedCameraRole
+        transportCoordinator.setIntrinsicsCalibrationActive(true)
+        captureRuntime.pauseSession()
+
+        let vc = IntrinsicsCalibrationViewController(uploader: uploader, cameraRole: role)
+        vc.onFinished = { [weak self] uploaded in
+            guard let self else { return }
+            self.captureRuntime.resumeSession()
+            self.transportCoordinator.setIntrinsicsCalibrationActive(false)
+            guard uploaded else { return }
+            // Delay matches the plan: give runtime ~1s to repopulate its
+            // frame buffer before server tries to pull a calibration frame.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.uploader.postAutoCalibrate(cameraRole: role) { result in
+                    if case .failure(let err) = result {
+                        // Don't surface to operator — auto-cal can be retried
+                        // from the dashboard. This is best-effort chaining.
+                        Logger(subsystem: "com.Max0228.ball-tracker",
+                                category: "intrinsics.vc")
+                            .warning("postAutoCalibrate after charuco upload failed: \(err.localizedDescription, privacy: .public)")
+                    }
+                }
+            }
+        }
+        present(vc, animated: true)
     }
 
     private func roleControlChanged() {

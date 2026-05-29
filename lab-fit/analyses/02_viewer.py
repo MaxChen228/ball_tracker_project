@@ -131,7 +131,9 @@ def build_payload():
             continue
         gap_thr = r.get("gap_threshold_m") or 0.2
         for path in ("server_post", "live"):
-            raw = r.get("triangulated_by_path", {}).get(path, [])
+            from data_loader import algorithm_id_for_path
+            alg = algorithm_id_for_path(r, path)
+            raw = r.get("triangulated_by_algorithm", {}).get(alg, []) if alg else []
             pts = _to_pts(raw, gap_thr)
             if len(pts) < 4:
                 continue

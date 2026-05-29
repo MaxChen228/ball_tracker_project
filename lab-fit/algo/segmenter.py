@@ -93,6 +93,7 @@ def find_segments(
     gate_b: float = 0.10,
     max_consec_misses: int = 3,
     min_displacement_m: float = 0.30,
+    dedupe_rank_by: str = "chord",
 ) -> tuple[list[Segment], np.ndarray]:
     """Run multi-segment ballistic extraction.
 
@@ -192,7 +193,7 @@ def find_segments(
             # Burn the seed pair so we don't re-pick.
             used[list(seed)] = True
 
-    segments = _dedupe_segments(segments)
+    segments = _dedupe_segments(segments, pts, rank_by=dedupe_rank_by)
     segments = _merge_compatible_segments(
         segments, pts, back_to_orig=back_to_orig, gate_r0=gate_r0_m,
     )
@@ -298,17 +299,36 @@ def _try_merge_pair(
 
 def _dedupe_segments(
     segments: list[Segment],
+    pts: np.ndarray,
     *,
-    cos_threshold: float = 0.95,
     overlap_frac_threshold: float = 0.30,
+    rank_by: str = "chord",
+    cos_threshold: float = 0.95,
 ) -> list[Segment]:
-    """Drop segments that overlap in time AND share velocity direction
-    with a longer / lower-RMSE segment — they are the same physical
-    event captured by parallel live triangulation pairs."""
+    """When two segments overlap in time by ≥ `overlap_frac_threshold`
+    of the shorter span, drop the one with the shorter 3D chord — the
+    real fit moves the ball further; stereo ghosts cluster spatially.
+
+    `rank_by="legacy"` reproduces the pre-2026-05-27 behaviour for A/B
+    comparison in lab-fit (rank by -n then +rmse, with an additional
+    `cos(v0_a, v0_b) ≥ cos_threshold` gate). Production callers use the
+    default ("chord").
+    """
     if len(segments) <= 1:
         return segments
-    # Score: longer first, ties broken by lower RMSE.
-    ordered = sorted(segments, key=lambda s: (-len(s.indices), s.rmse_m))
+
+    def chord(s: Segment) -> float:
+        a = pts[s.indices[0], 1:4]
+        b = pts[s.indices[-1], 1:4]
+        return float(np.linalg.norm(b - a))
+
+    if rank_by == "chord":
+        ordered = sorted(segments, key=lambda s: -chord(s))
+    elif rank_by == "legacy":
+        ordered = sorted(segments, key=lambda s: (-len(s.indices), s.rmse_m))
+    else:
+        raise ValueError(f"unknown rank_by: {rank_by!r}")
+
     keep: list[Segment] = []
     for s in ordered:
         is_dup = False
@@ -323,13 +343,15 @@ def _dedupe_segments(
                 continue
             if ovlp / short_span < overlap_frac_threshold:
                 continue
-            cos = float(
-                np.dot(s.v0, k.v0)
-                / (np.linalg.norm(s.v0) * np.linalg.norm(k.v0) + 1e-9)
-            )
-            if cos >= cos_threshold:
-                is_dup = True
-                break
+            if rank_by == "legacy":
+                cos = float(
+                    np.dot(s.v0, k.v0)
+                    / (np.linalg.norm(s.v0) * np.linalg.norm(k.v0) + 1e-9)
+                )
+                if cos < cos_threshold:
+                    continue
+            is_dup = True
+            break
         if not is_dup:
             keep.append(s)
     # Re-sort kept segments by t_start so consumer sees chronological order.

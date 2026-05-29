@@ -102,6 +102,23 @@ final class CameraTransportCoordinator: NSObject {
     private let calCaptureStateLock = NSLock()
     private var _calCaptureState: CalCaptureState = .idle
 
+    /// True while `IntrinsicsCalibrationViewController` owns the back
+    /// camera. WS command router gates the same set of session-mutating
+    /// commands on this flag as on `calCaptureState != .idle`, but the
+    /// flag is independent so the 12 MP swap state machine can't be
+    /// accidentally driven by VC presentation.
+    private var _intrinsicsCalibrationActive: Bool = false
+
+    func setIntrinsicsCalibrationActive(_ active: Bool) {
+        calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
+        _intrinsicsCalibrationActive = active
+    }
+
+    private func intrinsicsCalibrationActiveSnapshot() -> Bool {
+        calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
+        return _intrinsicsCalibrationActive
+    }
+
     private func calStateSnapshot() -> CalCaptureState {
         calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
         return _calCaptureState
@@ -144,7 +161,15 @@ final class CameraTransportCoordinator: NSObject {
     func connect() {
         guard let baseURL = webSocketURL() else { return }
         if ws == nil {
-            let connection = ServerWebSocketConnection(baseURL: baseURL, cameraId: cameraRole)
+            // Phase 0 PR3 — the WS URL path identifier is now device_uuid
+            // (identifierForVendor), not camera_id. Server resolves
+            // device_uuid → camera_id via the persistent assignment store
+            // and pushes `cam_id_assigned` (or `cam_id_pending` while
+            // waiting for the dashboard to assign). `cameraRole` here
+            // stays as the cached UserDefaults value used for local
+            // labeling and for the LiveFrameDispatcher payload `cam`
+            // field; the server treats that field as advisory only.
+            let connection = ServerWebSocketConnection(baseURL: baseURL, cameraId: DeviceIdentity.id)
             connection.delegate = self
             ws = connection
             frameDispatcher = LiveFrameDispatcher(
@@ -366,6 +391,9 @@ final class CameraTransportCoordinator: NSObject {
                 startStandbyCapture: { [weak self] in self?.dependencies.startStandbyCapture() },
                 stopCapture: { [weak self] in self?.dependencies.stopCapture() },
                 getCalCaptureState: { [weak self] in self?.calStateSnapshot() ?? .idle },
+                getIntrinsicsCalibrationActive: { [weak self] in
+                    self?.intrinsicsCalibrationActiveSnapshot() ?? false
+                },
                 armCalibrationCapture: { [weak self] in
                     guard let self else { return false }
                     return self.armCalibrationCapture(whileIn: self.dependencies.getState())

@@ -198,6 +198,35 @@ final class CameraCaptureRuntime {
         }
     }
 
+    /// Temporarily release the AVCaptureSession so a sibling session
+    /// (`IntrinsicsCalibrationViewController`) can take ownership of the
+    /// same back camera. Two sessions sharing one device cause the second
+    /// `startRunning()` to silently evict the first — this is the
+    /// explicit handoff. Inputs/outputs and delegates stay configured;
+    /// `resumeSession()` just calls `startRunning()` again.
+    func pauseSession() {
+        previewLayer?.isHidden = true
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.session.isRunning {
+                self.session.stopRunning()
+                captureLog.info("camera session paused (intrinsics handoff)")
+            }
+        }
+    }
+
+    /// Reverse of `pauseSession()`. Idempotent.
+    func resumeSession() {
+        previewLayer?.isHidden = false
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if !self.session.isRunning {
+                self.session.startRunning()
+                captureLog.info("camera session resumed (intrinsics handoff)")
+            }
+        }
+    }
+
     func reconcileStandbyCaptureState(previewRequested: Bool, calibrationFrameCaptureArmed: Bool) {
         if previewRequested || calibrationFrameCaptureArmed {
             startCapture(targetFps: standbyFps)

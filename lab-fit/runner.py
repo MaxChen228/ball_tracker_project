@@ -1,10 +1,12 @@
 """Run the frozen segmenter on a result file's triangulated points.
 
-Result JSON stores `triangulated` (or `triangulated_by_path`) as dicts.
-Convert to the input shape segmenter expects, run, return Segments + pts.
+Result JSON stores per-algorithm point clouds in
+`triangulated_by_algorithm` (keys: `ios_capture_time` = LIVE, plus the
+active server-post algorithm id). Convert to the input shape segmenter
+expects, run, return Segments + pts.
 
-Important: server-side `routes/pitch.py` filters triangulated points by
-`gap_threshold_m` BEFORE passing to find_segments. We replicate that
+Important: server-side `session_results.py` filters triangulated points
+by `gap_threshold_m` BEFORE passing to find_segments. We replicate that
 behavior here so lab analyses match production.
 """
 
@@ -58,8 +60,18 @@ def run_for_result(
     apply_residual_gate: bool = True,
     **segmenter_kwargs,
 ) -> tuple[list[Segment], np.ndarray]:
-    """Run on a specific path ('live' or 'server_post') of a result dict."""
-    raw = result["triangulated_by_path"][path]
+    """Run on a specific path ('live' or 'server_post') of a result dict.
+
+    Resolves the logical path to its algorithm id via
+    `algorithm_id_for_path`, then reads `triangulated_by_algorithm`.
+    Returns empty if the path has no points for this session.
+    """
+    from data_loader import algorithm_id_for_path
+
+    alg = algorithm_id_for_path(result, path)
+    if alg is None:
+        return [], np.empty((0, 5))
+    raw = result.get("triangulated_by_algorithm", {}).get(alg, []) or []
     return run_segmenter(
         raw,
         gap_threshold_m=result["gap_threshold_m"],

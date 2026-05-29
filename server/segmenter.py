@@ -195,7 +195,7 @@ def find_segments(
             # Burn the seed pair so we don't re-pick.
             used[list(seed)] = True
 
-    segments = _dedupe_segments(segments)
+    segments = _dedupe_segments(segments, pts)
     segments = _merge_compatible_segments(
         segments, pts, back_to_orig=back_to_orig, gate_r0=gate_r0_m,
     )
@@ -301,17 +301,30 @@ def _try_merge_pair(
 
 def _dedupe_segments(
     segments: list[Segment],
+    pts: np.ndarray,
     *,
-    cos_threshold: float = 0.95,
     overlap_frac_threshold: float = 0.30,
 ) -> list[Segment]:
-    """Drop segments that overlap in time AND share velocity direction
-    with a longer / lower-RMSE segment — they are the same physical
-    event captured by parallel live triangulation pairs."""
+    """When two segments overlap in time by ≥ `overlap_frac_threshold`
+    of the shorter span, drop the one with the shorter 3D chord — the
+    real fit moves the ball further; stereo mis-correspondences cluster
+    spatially (jittered disparity → tightly clustered 3D points → short
+    chord) regardless of how cleanly they fit ballistic motion.
+
+    Chord-only ranking is intentionally the *single* tiebreak: more
+    elaborate scoring (point count, RMSE, LOO) all have failure modes
+    where a stereo ghost can win by accident.
+    """
     if len(segments) <= 1:
         return segments
-    # Score: longer first, ties broken by lower RMSE.
-    ordered = sorted(segments, key=lambda s: (-len(s.indices), s.rmse_m))
+
+    def chord(s: Segment) -> float:
+        a = pts[s.indices[0], 1:4]
+        b = pts[s.indices[-1], 1:4]
+        return float(np.linalg.norm(b - a))
+
+    # Score: longer chord wins.
+    ordered = sorted(segments, key=lambda s: -chord(s))
     keep: list[Segment] = []
     for s in ordered:
         is_dup = False
@@ -326,13 +339,8 @@ def _dedupe_segments(
                 continue
             if ovlp / short_span < overlap_frac_threshold:
                 continue
-            cos = float(
-                np.dot(s.v0, k.v0)
-                / (np.linalg.norm(s.v0) * np.linalg.norm(k.v0) + 1e-9)
-            )
-            if cos >= cos_threshold:
-                is_dup = True
-                break
+            is_dup = True
+            break
         if not is_dup:
             keep.append(s)
     # Re-sort kept segments by t_start so consumer sees chronological order.
