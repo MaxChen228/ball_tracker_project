@@ -154,7 +154,27 @@ def _validate_intrinsics_payload(rec: DeviceIntrinsics) -> None:
                 f"different resolution than source_dims claim"
             ),
         )
-    if k.distortion is not None and len(k.distortion) != 5:
+    # iOS ChArUco upload (IntrinsicsPendingCache.swift / ServerUploader.swift)
+    # ALWAYS ships the full 5-coefficient distortion solved alongside K. A
+    # missing distortion on this wire boundary is therefore not a legal
+    # "pinhole" calibration — it can only be a wire regression (dropped
+    # field, schema drift), which would silently degrade triangulation to a
+    # zero-distortion pinhole at frame edges. Reject it loudly instead of
+    # letting the np.zeros(5) ray-path fallback absorb it (CLAUDE.md
+    # 'Experimental phase — 禁止 silent fallback'). The internal FOV
+    # approximation path keeps its legitimate distortion=None pinhole mode;
+    # it never flows through this upload route.
+    if k.distortion is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "distortion is required on device-intrinsics upload "
+                "(iOS always solves + sends 5 coefficients [k1, k2, p1, p2, "
+                "k3]); a missing vector is a wire regression, not a pinhole "
+                "calibration"
+            ),
+        )
+    if len(k.distortion) != 5:
         raise HTTPException(
             status_code=422,
             detail=(

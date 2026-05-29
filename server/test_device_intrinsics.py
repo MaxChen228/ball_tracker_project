@@ -102,6 +102,21 @@ def test_distortion_wrong_length_rejected(tmp_path, monkeypatch):
     assert r.status_code == 422
 
 
+def test_distortion_missing_rejected(tmp_path, monkeypatch):
+    """iOS ChArUco upload always solves + sends 5 distortion coefficients;
+    a missing vector on this wire boundary is a regression that would
+    silently degrade triangulation to a zero-distortion pinhole at frame
+    edges. Reject loudly rather than let the ray-path np.zeros(5) fallback
+    absorb it (CLAUDE.md no-silent-fallback)."""
+    monkeypatch.setattr(main, "state", main.State(data_dir=tmp_path))
+    client = TestClient(app)
+    bad = json.loads(json.dumps(_VALID_BODY))
+    del bad["intrinsics"]["distortion"]
+    r = client.post(f"/calibration/intrinsics/{_DEVICE_ID}", json=bad)
+    assert r.status_code == 422
+    assert "distortion is required" in r.text
+
+
 def test_auto_cal_consumes_charuco_prior(tmp_path, monkeypatch):
     """The core win: after uploading a ChArUco record for device X, auto-cal
     for the role that device currently plays must pick up the measured K
