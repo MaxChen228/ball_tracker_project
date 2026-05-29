@@ -164,6 +164,11 @@ final class IntrinsicsCaptureController: NSObject {
     private let calibrator = BTCharucoCalibrator()
     private var lastPreviewAt: Date = .distantPast
     private var lastShotAcceptedAt: Date = Date()
+    // One-shot latch so the inactivity timeout emits `.failedTooFewShots`
+    // exactly once. Without it the condition stays true on every
+    // subsequent preview frame (shotCount unchanged, lastShotAcceptedAt
+    // not advanced) and floods onProgress at the preview rate.
+    private var didEmitTimeoutFailure: Bool = false
     private var focusStableSince: Date?
     private var photoInFlight: Bool = false
     private var seenFingerprints: Set<PoseFingerprint> = []
@@ -324,6 +329,7 @@ final class IntrinsicsCaptureController: NSObject {
         photoInFlight = false
         focusStableSince = nil
         lastDetectedCornersPreview = []
+        didEmitTimeoutFailure = false
     }
 
     // MARK: - State machine
@@ -334,12 +340,17 @@ final class IntrinsicsCaptureController: NSObject {
         lastPreviewAt = now
 
         // Inactivity timeout — VC handles by surfacing the failure status.
-        if calibrator.shotCount > 0 || !seenFingerprints.isEmpty {
+        // Latched so it fires once; subsequent frames return early without
+        // re-emitting until reset() re-arms the controller.
+        if !didEmitTimeoutFailure
+            && (calibrator.shotCount > 0 || !seenFingerprints.isEmpty) {
             if now.timeIntervalSince(lastShotAcceptedAt) > Self.inactivityTimeoutSeconds {
+                didEmitTimeoutFailure = true
                 emitProgress(.failedTooFewShots)
                 return
             }
         }
+        if didEmitTimeoutFailure { return }
 
         if photoInFlight { return }
 

@@ -588,8 +588,19 @@ final class ServerUploader: @unchecked Sendable {
                 completion(.failure(error))
                 return
             }
-            if let http = response as? HTTPURLResponse,
-               !(200...299).contains(http.statusCode) {
+            // A nil error with no HTTPURLResponse must NOT be treated as
+            // success — that silently signals "upload landed" when nothing
+            // was actually POSTed (mocked session, non-HTTP scheme, race).
+            // Mirror the multipart upload path's guard above.
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure(NSError(
+                    domain: "ServerUploader",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "no HTTPURLResponse"]
+                )))
+                return
+            }
+            if !(200...299).contains(http.statusCode) {
                 completion(.failure(NSError(
                     domain: "ServerUploader",
                     code: http.statusCode,

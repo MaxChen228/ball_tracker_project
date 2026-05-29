@@ -114,6 +114,13 @@ final class CameraTransportCoordinator: NSObject {
         _intrinsicsCalibrationActive = active
     }
 
+    /// Public, lock-respecting read of the intrinsics-VC gate. Used by the
+    /// host VC to make camera-restore idempotent across the onFinished and
+    /// presentation-dismiss paths.
+    func getIntrinsicsCalibrationActive() -> Bool {
+        intrinsicsCalibrationActiveSnapshot()
+    }
+
     private func intrinsicsCalibrationActiveSnapshot() -> Bool {
         calCaptureStateLock.lock(); defer { calCaptureStateLock.unlock() }
         return _intrinsicsCalibrationActive

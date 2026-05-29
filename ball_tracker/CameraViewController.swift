@@ -809,10 +809,15 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         captureRuntime.pauseSession()
 
         let vc = IntrinsicsCalibrationViewController(uploader: uploader, cameraRole: role)
+        // Block interactive swipe-dismiss and route any non-onFinished
+        // teardown (system dismissal, host pop) through the same restore
+        // path — otherwise the camera stays paused and WS commands stay
+        // gated until app relaunch.
+        vc.isModalInPresentation = true
+        vc.presentationController?.delegate = self
         vc.onFinished = { [weak self] uploaded in
             guard let self else { return }
-            self.captureRuntime.resumeSession()
-            self.transportCoordinator.setIntrinsicsCalibrationActive(false)
+            self.restoreCameraAfterIntrinsics()
             guard uploaded else { return }
             // Delay matches the plan: give runtime ~1s to repopulate its
             // frame buffer before server tries to pull a calibration frame.
@@ -829,6 +834,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
             }
         }
         present(vc, animated: true)
+    }
+
+    /// Reverse `presentIntrinsicsCalibration`'s ownership swap: resume the
+    /// runtime session and clear the command-router gate. Idempotent — the
+    /// `getIntrinsicsCalibrationActive` guard makes a double-invoke (e.g.
+    /// onFinished plus a presentation-dismiss delegate callback) a no-op.
+    private func restoreCameraAfterIntrinsics() {
+        guard transportCoordinator.getIntrinsicsCalibrationActive() else { return }
+        captureRuntime.resumeSession()
+        transportCoordinator.setIntrinsicsCalibrationActive(false)
     }
 
     private func roleControlChanged() {
@@ -961,4 +976,16 @@ final class CameraViewController: UIViewController, AVCaptureVideoDataOutputSamp
         detectionPool.reset()
     }
 
+}
+
+extension CameraViewController: UIAdaptivePresentationControllerDelegate {
+    /// Fires on any non-programmatic dismissal of the intrinsics modal
+    /// (the swipe gesture is blocked by `isModalInPresentation`, but a
+    /// system-driven teardown can still reach here). Restore the camera
+    /// so the runtime doesn't stay paused with WS commands gated off.
+    /// `restoreCameraAfterIntrinsics` is idempotent, so this is harmless
+    /// even if `onFinished` already ran.
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        restoreCameraAfterIntrinsics()
+    }
 }
