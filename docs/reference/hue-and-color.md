@@ -25,6 +25,21 @@ container but only 0-179 is used (each unit = 2°). S and V are standard
   OpenCV or standard 0-360. UI / image-editor 0-360 values must be
   halved before storing.
 
+### Hue wrap-around (red/orange balls)
+
+Red/orange straddle the 179→0 boundary, so their range is `h_min > h_max`
+(e.g. red = `h_min=170, h_max=10`). A single `cv2.inRange` then requires
+`h>=h_min AND h<=h_max` per pixel — never true → **all-zero mask → silent
+zero-detection** (no candidate, no error). Both ends therefore split a
+wrap range into `[h_min,179] ∪ [0,h_max]` sharing S/V and OR the masks:
+
+- server: `detection._run_hsv_emit_pipeline` (the `h_min > h_max` branch).
+- iOS: `BallDetector.mm` `detectAllCandidatesScratch` (`hMin > hMax` branch).
+
+These must stay lock-step. Regression: `server/test_hue_wrap.py`.
+`blue_ball` (105-112) and `tennis` (25-55) do **not** wrap, so the single
+-segment path is unchanged for the current presets.
+
 ## iOS↔server colour-matrix gap
 
 iOS converts NV12 → BGR via `cv::COLOR_YUV2BGR_NV12`, which hard-codes

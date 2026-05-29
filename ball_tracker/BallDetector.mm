@@ -69,10 +69,28 @@ static NSArray<BTBallDetection *> *detectAllCandidatesScratch(
     int *_Nullable outLargestW, int *_Nullable outLargestH
 ) {
     cv::cvtColor(bgr, scratch.hsv, cv::COLOR_BGR2HSV);
-    cv::inRange(scratch.hsv,
-                cv::Scalar(hMin, sMin, vMin),
-                cv::Scalar(hMax, sMax, vMax),
-                scratch.mask);
+    if (hMin <= hMax) {
+        cv::inRange(scratch.hsv,
+                    cv::Scalar(hMin, sMin, vMin),
+                    cv::Scalar(hMax, sMax, vMax),
+                    scratch.mask);
+    } else {
+        // Hue wraps 179->0 (red/orange balls). OpenCV hue is 0-179; a single
+        // inRange with hMin>hMax requires (h>=hMin AND h<=hMax) per pixel,
+        // which is never true -> all-zero mask -> silent zero-detection.
+        // Split into [hMin,179] U [0,hMax] sharing S/V bounds, then OR. Kept
+        // lockstep with server detection.py. See docs/reference/hue-and-color.md.
+        cv::Mat maskHi, maskLo;
+        cv::inRange(scratch.hsv,
+                    cv::Scalar(hMin, sMin, vMin),
+                    cv::Scalar(179, sMax, vMax),
+                    maskHi);
+        cv::inRange(scratch.hsv,
+                    cv::Scalar(0, sMin, vMin),
+                    cv::Scalar(hMax, sMax, vMax),
+                    maskLo);
+        cv::bitwise_or(maskHi, maskLo, scratch.mask);
+    }
     int ncomp = cv::connectedComponentsWithStats(
         scratch.mask, scratch.labels, scratch.stats, scratch.centroids, 8, CV_32S
     );

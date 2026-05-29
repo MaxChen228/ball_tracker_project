@@ -151,7 +151,21 @@ def _run_hsv_emit_pipeline(
     assert frame is not None and frame.size > 0, \
         "frame invariant violated (None or empty) — upstream decoder bug"
     hsv = frame if is_hsv else cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, hsv_range.lo(), hsv_range.hi())
+    lo, hi = hsv_range.lo(), hsv_range.hi()
+    if hsv_range.h_min <= hsv_range.h_max:
+        mask = cv2.inRange(hsv, lo, hi)
+    else:
+        # Hue wraps 179→0 (red/orange balls). OpenCV hue is 0-179; a single
+        # inRange with h_min>h_max requires (h>=h_min AND h<=h_max) per pixel,
+        # which is never true → all-zero mask → silent zero-detection (no
+        # candidate, no error). Split into [h_min,179] ∪ [0,h_max] sharing the
+        # S/V bounds, then OR. See docs/reference/hue-and-color.md.
+        seg_hi = np.array([179, hi[1], hi[2]], dtype=np.uint8)
+        seg_lo = np.array([0, lo[1], lo[2]], dtype=np.uint8)
+        mask = cv2.bitwise_or(
+            cv2.inRange(hsv, lo, seg_hi),
+            cv2.inRange(hsv, seg_lo, hi),
+        )
     if close_kernel is not None:
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _close_kernel(close_kernel))
 
