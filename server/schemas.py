@@ -894,6 +894,77 @@ class SyncRun:
         }
 
 
+class QuickSyncReport(BaseModel):
+    """Wire payload for `POST /sync/quick_audio_upload`. One per listening
+    phone (INCLUDING the emitter, which self-hears its own chirp). Unlike
+    mutual sync there is a single chirp band: the emitter plays it and every
+    phone — emitter included — matched-filters that one band off its mic
+    stream. `anchor_pts_s` is the chirp-arrival PTS on THAT phone's own host
+    clock; the solver differences each listener's anchor against the
+    emitter's to recover per-phone clock offsets. Null anchor = that phone
+    never heard the chirp (too far / mic occluded); the solver disables it
+    for the session rather than aborting the whole run, EXCEPT when the
+    emitter itself missed (no self-hear) — then the run has no zero point
+    and aborts."""
+    camera_id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,16}$")
+    sync_id: str = Field(..., pattern=_SYNC_ID_PATTERN)
+    anchor_pts_s: float | None = None
+    aborted: bool = False
+    abort_reason: str | None = None
+    # Optional matched-filter trace for the debug plot. Same 30 Hz cadence
+    # as mutual sync's per-band trace.
+    trace: list[SyncTraceSample] | None = None
+
+
+class QuickSyncResult(BaseModel):
+    """Outcome of one quick-sync run. `deltas_s[cam] = anchor[cam] −
+    anchor[emitter]` on the shared physical chirp; apply as
+    `t_on_emitter_clock = t_on_cam − deltas_s[cam]`. The emitter's own delta
+    is exactly 0.0. `aborted=True` only when the emitter failed self-hear
+    (no zero point); a listener that missed lands in `missing_cam_ids` and
+    is silently absent from `deltas_s` — NOT a fallback, the operator must
+    re-sync or proceed without that cam."""
+    id: str
+    emitter_cam_id: str
+    solved_at: float
+    listener_cam_ids: list[str]
+    # cam_id → chirp-arrival PTS on that cam's own clock (solved cams only).
+    anchors_pts_s: dict[str, float] = Field(default_factory=dict)
+    # cam_id → (anchor_cam − anchor_emitter). Emitter entry == 0.0.
+    deltas_s: dict[str, float] = Field(default_factory=dict)
+    aborted: bool = False
+    abort_reasons: dict[str, str] = Field(default_factory=dict)
+    # Listeners that were expected but never heard the chirp → disabled for
+    # the session. Explicit so the dashboard shows who dropped out.
+    missing_cam_ids: list[str] = Field(default_factory=list)
+
+
+@dataclass
+class QuickSyncRun:
+    """Transient in-memory state for an in-progress quick-sync run. Keyed by
+    camera_id (every listener — emitter included — reports once). The
+    emitter is also a listener so its self-hear anchor is the run's zero
+    point."""
+    id: str
+    emitter_cam_id: str
+    listener_cam_ids: list[str]
+    started_at: float
+    reports: dict[str, QuickSyncReport] = field(default_factory=dict)
+
+    @property
+    def complete(self) -> bool:
+        return all(c in self.reports for c in self.listener_cam_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "emitter_cam_id": self.emitter_cam_id,
+            "listener_cam_ids": self.listener_cam_ids,
+            "started_at": self.started_at,
+            "reports_received": sorted(self.reports.keys()),
+        }
+
+
 @dataclass
 class Device:
     """Most recent heartbeat from a single iPhone. `last_seen_at` is a wall

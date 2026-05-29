@@ -310,6 +310,56 @@ def detect_sync_report(
     return report, debug
 
 
+def detect_quick_sync_report(
+    wav_bytes: bytes,
+    sync_id: str,
+    camera_id: str,
+    audio_start_pts_s: float,
+    emit_at_s: list[float],
+    search_window_s: float = 0.3,
+) -> tuple["QuickSyncReport", dict[str, float]]:
+    """Single-band quick-sync detection. Every listening phone — emitter
+    included — matched-filters the ONE emitter band (band A) off its own
+    mic stream and reports the chirp-arrival PTS on its own host clock.
+
+    Unlike mutual sync there is no self/other split: there's exactly one
+    physical chirp and one band to find. We reuse the windowed multi-burst
+    detector + median combine for robustness against a single bad burst.
+
+    Returns `(report, debug)`. `debug` carries the raw peak / PSR so a
+    weak-detection post-mortem can see the real numbers even when the
+    report is a clean success.
+    """
+    from schemas import QuickSyncReport
+
+    if not emit_at_s:
+        raise ValueError("emit_at_s is required (non-empty list)")
+
+    audio, sample_rate = load_wav_mono_float(wav_bytes)
+    ref = _build_reference(sample_rate, SYNC_BAND_A_F0, SYNC_BAND_A_F1)
+    dets = detect_band_windowed(
+        audio, sample_rate, ref, audio_start_pts_s, emit_at_s, search_window_s
+    )
+    det = _median_band_detection(dets)
+
+    report = QuickSyncReport(
+        camera_id=camera_id,
+        sync_id=sync_id,
+        anchor_pts_s=float(det.center_pts_s),
+        aborted=False,
+        abort_reason=None,
+        trace=det.trace,
+    )
+    debug = {
+        "sample_rate": float(sample_rate),
+        "duration_s": float(len(audio)) / float(sample_rate),
+        "peak": float(det.peak_norm),
+        "psr": float(det.psr),
+        "n_burst": len(emit_at_s),
+    }
+    return report, debug
+
+
 def now_s() -> float:
     """Monotonic seconds used when the caller needs to stamp detection
     latency. Shim kept here so tests can monkey-patch without touching

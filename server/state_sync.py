@@ -8,6 +8,9 @@ from threading import Lock
 from typing import Any, Callable
 
 from schemas import (
+    QuickSyncReport,
+    QuickSyncResult,
+    QuickSyncRun,
     RoleSyncTimes,
     RoleSyncTraces,
     SyncLogEntry,
@@ -55,6 +58,16 @@ _TIME_SYNC_INTENT_WINDOW_S = 20.0
 # counts as "ready" for a fresh arm.
 _TIME_SYNC_MAX_AGE_S = 30.0
 
+# Quick sync (single-emitter, N-listener) wall-time budget for all
+# listeners to upload their WAV + post their detection. Longer than mutual
+# sync's 8s because N≥3 phones each upload sequentially over LAN.
+_QUICK_SYNC_TIMEOUT_S = 12.0
+
+# Post-quick-sync cooldown blocking a fresh /sync/quick_start, mirroring the
+# mutual-sync cooldown rationale (let the operator read the result, stop
+# rapid-fire retries thrashing the phones).
+_QUICK_SYNC_COOLDOWN_S = 10.0
+
 
 def _new_sync_id() -> str:
     # Distinct `sy_` prefix so log lines immediately differentiate a
@@ -95,6 +108,10 @@ class SyncCoordinator:
         self._current_sync: SyncRun | None = None
         self._last_sync_result: SyncResult | None = None
         self._sync_cooldown_until: float = 0.0
+        # Quick sync (single-emitter, N-listener): at most one run active.
+        self._current_quick_sync: QuickSyncRun | None = None
+        self._last_quick_sync_result: QuickSyncResult | None = None
+        self._quick_sync_cooldown_until: float = 0.0
         # Ring buffer of diagnostic events from the mutual-sync flow.
         self._sync_log: deque[SyncLogEntry] = deque(maxlen=500)
         # Legacy third-device chirp sync intent + per-cam pending command
@@ -662,4 +679,246 @@ class SyncCoordinator:
                 "sync solved id=%s delta_s=%.6f distance_m=%.3f",
                 result.id, result.delta_s, result.distance_m,
             )
+            return None, result, None
+
+    # ---- quick-sync run machinery (single-emitter, N-listener) ----------
+
+    def current_quick_sync(self) -> QuickSyncRun | None:
+        now = self._time_fn()
+        with self._lock:
+            self._check_quick_sync_timeout_locked(now)
+            return self._current_quick_sync
+
+    def last_quick_sync_result(self) -> QuickSyncResult | None:
+        with self._lock:
+            return self._last_quick_sync_result
+
+    def quick_sync_cooldown_remaining_s(self) -> float:
+        now = self._time_fn()
+        with self._lock:
+            return max(0.0, self._quick_sync_cooldown_until - now)
+
+    def start_quick_sync_locked(
+        self, now: float, *, emitter_cam_id: str, online_ids: list[str],
+        session_armed: bool,
+    ) -> tuple[QuickSyncRun | None, str | None]:
+        """Begin a quick-sync run. Precondition priority mirrors mutual:
+          1. armed session → "session_armed"
+          2. quick sync already running → "sync_in_progress"
+          3. cooldown active → "cooldown"
+          4. emitter not online → "emitter_offline"
+        The emitter is itself a listener (self-hear anchor = zero point), so
+        listeners = all online cams (emitter included). N=1 is allowed: a
+        lone emitter still self-hears and trivially solves with delta 0 —
+        useful for a single-cam smoke test. Caller holds the shared lock."""
+        self._check_quick_sync_timeout_locked(now)
+        reject_reason: str | None = None
+        if session_armed:
+            reject_reason = "session_armed"
+        elif self._current_quick_sync is not None:
+            reject_reason = "sync_in_progress"
+        elif now < self._quick_sync_cooldown_until:
+            reject_reason = "cooldown"
+        elif emitter_cam_id not in online_ids:
+            reject_reason = "emitter_offline"
+        if reject_reason is not None:
+            self._sync_log.append(SyncLogEntry(
+                ts=now, source="server", event="quick_start_rejected",
+                detail={
+                    "reason": reject_reason,
+                    "emitter": emitter_cam_id,
+                    "online": online_ids,
+                },
+            ))
+            logger.info(
+                "quick_sync start rejected reason=%s emitter=%s online=%s",
+                reject_reason, emitter_cam_id, online_ids,
+            )
+            return None, reject_reason
+        listeners = sorted(online_ids)
+        run = QuickSyncRun(
+            id=_new_sync_id(),
+            emitter_cam_id=emitter_cam_id,
+            listener_cam_ids=listeners,
+            started_at=now,
+        )
+        self._current_quick_sync = run
+        self._last_quick_sync_result = None
+        self._sync_log.append(SyncLogEntry(
+            ts=now, source="server", event="quick_start",
+            detail={"id": run.id, "emitter": emitter_cam_id, "listeners": listeners},
+        ))
+        logger.info(
+            "quick_sync start id=%s emitter=%s listeners=%s",
+            run.id, emitter_cam_id, listeners,
+        )
+        return run, None
+
+    def _check_quick_sync_timeout_locked(self, now: float) -> None:
+        s = self._current_quick_sync
+        if s is None:
+            return
+        if now - s.started_at > _QUICK_SYNC_TIMEOUT_S:
+            received = sorted(s.reports.keys())
+            self._sync_log.append(SyncLogEntry(
+                ts=now, source="server", event="quick_timeout",
+                detail={"id": s.id, "reports_received": received},
+            ))
+            logger.warning(
+                "quick_sync timeout id=%s received=%s", s.id, received
+            )
+            # Solve with whatever arrived: emitter self-hear present →
+            # partial solve (missing listeners disabled); emitter absent →
+            # abort (no zero point).
+            self._last_quick_sync_result = self._solve_quick_sync_locked(s, now)
+            self._current_quick_sync = None
+            self._quick_sync_cooldown_until = now + _QUICK_SYNC_COOLDOWN_S
+
+    def _solve_quick_sync_locked(
+        self, run: QuickSyncRun, solved_at: float,
+    ) -> QuickSyncResult:
+        """Difference every listener's anchor against the emitter's. The
+        emitter's self-hear anchor is the run's zero point; without it the
+        run aborts (no common reference). A listener with no anchor (missed
+        chirp or never reported before timeout) is disabled — recorded in
+        `missing_cam_ids`, absent from `deltas_s`. No silent fallback: a
+        missing emitter aborts loudly rather than picking some other cam as
+        an implicit zero."""
+        emitter = run.emitter_cam_id
+        emitter_rep = run.reports.get(emitter)
+        emitter_anchor = (
+            emitter_rep.anchor_pts_s
+            if emitter_rep is not None and not emitter_rep.aborted
+            else None
+        )
+        abort_reasons: dict[str, str] = {}
+        if emitter_anchor is None:
+            if emitter_rep is None:
+                abort_reasons[emitter] = "emitter_no_report"
+            elif emitter_rep.aborted:
+                abort_reasons[emitter] = emitter_rep.abort_reason or "emitter_aborted"
+            else:
+                abort_reasons[emitter] = "emitter_no_self_hear"
+            self._sync_log.append(SyncLogEntry(
+                ts=solved_at, source="server", event="quick_aborted",
+                detail={"id": run.id, "reasons": abort_reasons},
+            ))
+            logger.warning(
+                "quick_sync aborted id=%s emitter=%s reason=%s",
+                run.id, emitter, abort_reasons[emitter],
+            )
+            return QuickSyncResult(
+                id=run.id,
+                emitter_cam_id=emitter,
+                solved_at=solved_at,
+                listener_cam_ids=run.listener_cam_ids,
+                aborted=True,
+                abort_reasons=abort_reasons,
+                missing_cam_ids=[],
+            )
+        anchors: dict[str, float] = {}
+        deltas: dict[str, float] = {}
+        missing: list[str] = []
+        for cam in run.listener_cam_ids:
+            rep = run.reports.get(cam)
+            anchor = (
+                rep.anchor_pts_s
+                if rep is not None and not rep.aborted
+                else None
+            )
+            if anchor is None:
+                missing.append(cam)
+                abort_reasons[cam] = (
+                    (rep.abort_reason or "no_anchor") if rep is not None
+                    else "no_report"
+                )
+                continue
+            anchors[cam] = float(anchor)
+            deltas[cam] = float(anchor) - float(emitter_anchor)
+        self._sync_log.append(SyncLogEntry(
+            ts=solved_at, source="server", event="quick_solved",
+            detail={
+                "id": run.id,
+                "emitter": emitter,
+                "solved_cams": sorted(deltas.keys()),
+                "missing_cams": sorted(missing),
+                "deltas_s": {c: round(d, 6) for c, d in deltas.items()},
+            },
+        ))
+        logger.info(
+            "quick_sync solved id=%s emitter=%s solved=%s missing=%s",
+            run.id, emitter, sorted(deltas.keys()), sorted(missing),
+        )
+        return QuickSyncResult(
+            id=run.id,
+            emitter_cam_id=emitter,
+            solved_at=solved_at,
+            listener_cam_ids=run.listener_cam_ids,
+            anchors_pts_s=anchors,
+            deltas_s=deltas,
+            aborted=False,
+            abort_reasons=abort_reasons,
+            missing_cam_ids=sorted(missing),
+        )
+
+    def record_quick_sync_report(
+        self, report: QuickSyncReport,
+    ) -> tuple[QuickSyncRun | None, QuickSyncResult | None, str | None]:
+        """Ingest one listener's quick-sync detection. Returns
+        `(run_after, result, reason)`:
+          - reason == "no_sync": no active quick-sync run
+          - reason == "stale_sync_id": report's sync_id != current run
+          - result is not None: all listeners reported → run solved/aborted
+          - run_after is not None (result None): more listeners still pending
+        """
+        now = self._time_fn()
+        with self._lock:
+            self._check_quick_sync_timeout_locked(now)
+            run = self._current_quick_sync
+            if run is None:
+                self._sync_log.append(SyncLogEntry(
+                    ts=now, source="server", event="quick_report_no_sync",
+                    detail={"camera_id": report.camera_id, "sync_id": report.sync_id},
+                ))
+                logger.info(
+                    "quick_sync report no active sync cam=%s sync_id=%s",
+                    report.camera_id, report.sync_id,
+                )
+                return None, None, "no_sync"
+            if run.id != report.sync_id:
+                self._sync_log.append(SyncLogEntry(
+                    ts=now, source="server", event="quick_report_stale",
+                    detail={
+                        "camera_id": report.camera_id,
+                        "posted_sync_id": report.sync_id,
+                        "current_sync_id": run.id,
+                    },
+                ))
+                logger.info(
+                    "quick_sync report stale cam=%s posted=%s current=%s",
+                    report.camera_id, report.sync_id, run.id,
+                )
+                return run, None, "stale_sync_id"
+            run.reports[report.camera_id] = report
+            self._sync_log.append(SyncLogEntry(
+                ts=now, source="server", event="quick_report_received",
+                detail={
+                    "camera_id": report.camera_id,
+                    "anchor_pts_s": report.anchor_pts_s,
+                    "aborted": report.aborted,
+                    "received_so_far": sorted(run.reports.keys()),
+                },
+            ))
+            logger.info(
+                "quick_sync report received id=%s cam=%s anchor=%s aborted=%s",
+                run.id, report.camera_id,
+                "None" if report.anchor_pts_s is None else f"{report.anchor_pts_s:.6f}",
+                bool(report.aborted),
+            )
+            if not run.complete:
+                return run, None, None
+            result = self._solve_quick_sync_locked(run, now)
+            self._last_quick_sync_result = result
+            self._current_quick_sync = None
+            self._quick_sync_cooldown_until = now + _QUICK_SYNC_COOLDOWN_S
             return None, result, None

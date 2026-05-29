@@ -19,6 +19,13 @@ _SYNC_START_STATUS_FOR_REASON: dict[str, int] = {
     "devices_missing": 409,
 }
 
+_QUICK_SYNC_START_STATUS_FOR_REASON: dict[str, int] = {
+    "session_armed": 409,
+    "sync_in_progress": 409,
+    "cooldown": 409,
+    "emitter_offline": 409,
+}
+
 _SYNC_WAV_RE = re.compile(r"^sy_[0-9a-f]{4,32}_[A-Za-z0-9_-]{1,16}\.wav$")
 
 
@@ -51,6 +58,128 @@ async def sync_start(request: Request) -> dict[str, Any]:
     }
     await device_ws.broadcast(per_cam)
     return {"ok": True, "sync": run.to_dict()}
+
+
+@router.post("/sync/quick_start")
+async def sync_quick_start(request: Request) -> dict[str, Any]:
+    """Begin a quick-sync run. `emitter_cam_id` plays a single band-A chirp;
+    every online cam (emitter included) listens and uploads its recording to
+    `/sync/quick_audio_upload`. The emitter's self-hear anchor is the run's
+    zero point. Replaces the A↔B mutual chirp for the huddle-then-place
+    workflow — phones are clustered <10cm at sync time so propagation delay
+    is negligible and intentionally NOT compensated."""
+    from main import state, device_ws
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"JSON parse error: {e}") from e
+    emitter_cam_id = body.get("emitter_cam_id")
+    if not isinstance(emitter_cam_id, str) or not emitter_cam_id:
+        raise HTTPException(status_code=422, detail="emitter_cam_id (non-empty string) required")
+    run, reason = state.start_quick_sync(emitter_cam_id)
+    if reason is not None:
+        status_code = _QUICK_SYNC_START_STATUS_FOR_REASON.get(reason, 409)
+        raise HTTPException(status_code=status_code, detail={"ok": False, "error": reason})
+    assert run is not None
+    state.sync.reset_sync_telemetry_peaks(None)
+    params = state.sync_params()
+    per_cam = {
+        cam: {
+            "type": "sync_quick_run",
+            "sync_id": run.id,
+            "is_emitter": cam == emitter_cam_id,
+            "emit_at_s": params.emit_a_at_s,
+            "record_duration_s": params.record_duration_s,
+        }
+        for cam in run.listener_cam_ids
+    }
+    await device_ws.broadcast(per_cam)
+    return {"ok": True, "quick_sync": run.to_dict()}
+
+
+@router.post("/sync/quick_audio_upload")
+async def sync_quick_audio_upload(
+    payload: str = Form(...),
+    audio: UploadFile = File(...),
+) -> dict[str, Any]:
+    """One listening phone's quick-sync recording. Single emitter band, no
+    role split — server matched-filters band A off the WAV and reports the
+    chirp-arrival PTS on this phone's own clock."""
+    import logging
+    import sync_audio_detect
+    from main import state
+    logger = logging.getLogger("ball_tracker")
+    try:
+        meta = json.loads(payload)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=422, detail=f"payload JSON parse: {e}") from e
+    required = ("sync_id", "camera_id", "audio_start_pts_s")
+    missing = [k for k in required if meta.get(k) is None]
+    if missing:
+        raise HTTPException(status_code=422, detail=f"payload missing required keys: {missing}")
+    sync_id = str(meta["sync_id"])
+    camera_id = str(meta["camera_id"])
+    try:
+        audio_start_pts_s = float(meta["audio_start_pts_s"])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"audio_start_pts_s not a float: {e}") from e
+    wav_bytes = await audio.read()
+    if not wav_bytes:
+        raise HTTPException(status_code=422, detail="audio part empty")
+    audio_dir = state.data_dir / "sync_audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = audio_dir / f"{sync_id}_{camera_id}.wav"
+    wav_path.write_bytes(wav_bytes)
+    params = state.sync_params()
+    try:
+        report, debug = sync_audio_detect.detect_quick_sync_report(
+            wav_bytes=wav_bytes, sync_id=sync_id, camera_id=camera_id,
+            audio_start_pts_s=audio_start_pts_s,
+            emit_at_s=params.emit_a_at_s,
+            search_window_s=params.search_window_s,
+        )
+    except Exception as e:
+        logger.exception("sync_quick_audio_upload detection failed cam=%s", camera_id)
+        raise HTTPException(status_code=500, detail=f"detection failed: {e}") from e
+    logger.info(
+        "sync_quick_audio_upload cam=%s duration_s=%.3f peak=%.4f psr=%.2f anchor=%s",
+        camera_id, debug["duration_s"], debug["peak"], debug["psr"],
+        _fmt_optional_seconds(report.anchor_pts_s),
+    )
+    run_after, result, reason = state.sync.record_quick_sync_report(report)
+    if reason == "no_sync":
+        raise HTTPException(status_code=409, detail={"ok": False, "error": "no_sync"})
+    if reason == "stale_sync_id":
+        raise HTTPException(status_code=409, detail={"ok": False, "error": "stale_sync_id"})
+    resp: dict[str, Any] = {
+        "ok": True,
+        "solved": result is not None,
+        "detection": {
+            "peak": debug["peak"],
+            "psr": debug["psr"],
+            "duration_s": debug["duration_s"],
+            "sample_rate": debug["sample_rate"],
+            "n_burst": debug["n_burst"],
+            "wav_path": str(wav_path.relative_to(state.data_dir)),
+        },
+    }
+    if result is not None:
+        resp["result"] = result.model_dump()
+    elif run_after is not None:
+        resp["run"] = run_after.to_dict()
+    return resp
+
+
+@router.get("/sync/quick_state")
+def sync_quick_state() -> dict[str, Any]:
+    from main import state
+    run = state.sync.current_quick_sync()
+    last = state.sync.last_quick_sync_result()
+    return {
+        "quick_sync": run.to_dict() if run is not None else None,
+        "last_quick_sync": last.model_dump() if last is not None else None,
+        "cooldown_remaining_s": state.sync.quick_sync_cooldown_remaining_s(),
+    }
 
 
 @router.get("/sync/audio/{filename}")

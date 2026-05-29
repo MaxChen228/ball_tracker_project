@@ -19,6 +19,7 @@ from schemas import (
     FramePayload,
     IOS_CAPTURE_TIME_ALGORITHM_ID,
     PitchPayload,
+    QuickSyncRun,
     Session,
     SessionResult,
     SyncRun,
@@ -2087,6 +2088,24 @@ class State:
             return self._sync.start_sync_locked(
                 now,
                 online_ids,
+                session_armed=current is not None,
+            )
+
+    def start_quick_sync(
+        self, emitter_cam_id: str,
+    ) -> tuple["QuickSyncRun | None", str | None]:
+        """Begin a quick-sync run with `emitter_cam_id` as the chirp source.
+        Every online cam (emitter included) listens. Returns `(run, None)`
+        on success or `(None, reason)` on conflict — reasons: session_armed,
+        sync_in_progress, cooldown, emitter_offline."""
+        now = self._time_fn()
+        current = self.current_session()
+        online_ids = [d.camera_id for d in self.online_devices()]
+        with self._lock:
+            return self._sync.start_quick_sync_locked(
+                now,
+                emitter_cam_id=emitter_cam_id,
+                online_ids=online_ids,
                 session_armed=current is not None,
             )
 
